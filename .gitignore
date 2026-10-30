@@ -1,0 +1,11 @@
+bin/
+obj/
+dist/
+data/
+*.db
+*.db-wal
+*.db-shm
+local.settings.json
+photo-rules.json
+node_modules/
+.env

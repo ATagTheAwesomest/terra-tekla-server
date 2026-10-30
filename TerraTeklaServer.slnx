@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/TerraTeklaServer/TerraTeklaServer.csproj" />
+  <Project Path="tests/TerraTeklaServer.Tests/TerraTeklaServer.Tests.csproj" />
+</Solution>
