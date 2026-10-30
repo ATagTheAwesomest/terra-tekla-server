@@ -1,6 +1,7 @@
 #Requires -RunAsAdministrator
-# Pulls the latest code, builds it, and deploys it to the installed service. Also pulls the iPad app
-# (CLIENT_ROOT, a git clone of terra-tekla-client) so both update together.
+# Pulls the latest code, builds it, and deploys it to the installed service. Also runs
+# update-client.ps1 to get the latest iPad app (terra-tekla-client) into CLIENT_ROOT, so both update
+# together. The admin page's Update server runs this too (as the service, so it needs no prompt).
 # Usage (elevated PowerShell, from the repo root):  .\windows\deploy.ps1
 # local.settings.json, photo-rules.json and the data folder in the install folder are never touched.
 param(
@@ -25,24 +26,24 @@ if (-not $git -and (Test-Path 'C:\Program Files\Git\cmd\git.exe')) { $git = 'C:\
 
 # 0. Pull the latest code. Fast-forward only, so a diverged branch stops here instead of merging silently.
 if ($git -and -not $SkipPull) {
-    & $git -C $repo pull --ff-only
+    & $git -c safe.directory=* -C $repo pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw 'git pull failed (local changes or diverged branch). Nothing was deployed.' }
 }
 
-# 0b. The iPad app: a git clone at CLIENT_ROOT. It is served straight from there, so a pull is all it needs;
-# the iPads pick it up the next time the app is opened.
-$client = $settings.CLIENT_ROOT
-if ($git -and -not $SkipPull -and -not $SkipClient -and $client -and (Test-Path (Join-Path $client '.git'))) {
-    & $git -C $client pull --ff-only
-    if ($LASTEXITCODE -ne 0) { Write-Warning "git pull of the iPad app in $client failed; it keeps the version it had." }
-    else { Write-Host "iPad app: $(& $git -C $client log -1 --format='%h %s')" }
+# 0b. The iPad app: update-client.ps1 (beside this script) gets the latest terra-tekla-client into
+# CLIENT_ROOT. It is served straight from there; the iPads pick it up the next time the app is opened.
+if (-not $SkipPull -and -not $SkipClient) {
+    $clientRoot = $settings.CLIENT_ROOT
+    if ($clientRoot -and -not [System.IO.Path]::IsPathRooted($clientRoot)) { $clientRoot = Join-Path $InstallDir $clientRoot }
+    try { & (Join-Path $PSScriptRoot 'update-client.ps1') -ClientRoot $clientRoot }
+    catch { Write-Warning "iPad app not updated: $($_.Exception.Message)" }
 }
 
 $commit = 'unknown commit'
 $dirty = ''
 if ($git) {
-    $commit = & $git -C $repo rev-parse --short HEAD
-    $dirty = & $git -C $repo status --porcelain
+    $commit = & $git -c safe.directory=* -C $repo rev-parse --short HEAD
+    $dirty = & $git -c safe.directory=* -C $repo status --porcelain
 }
 Write-Host "Building $commit$(if ($dirty) { ' (uncommitted changes present)' })"
 

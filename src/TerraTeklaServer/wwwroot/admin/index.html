@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TERRA server</title>
   <meta name="theme-color" content="#121212">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="TERRA admin">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <link rel="stylesheet" href="admin.css">
   <script type="module" src="admin.js"></script>
 </head>
@@ -15,8 +20,11 @@
       <a href="#/" data-nav="home">Devices &amp; activity</a>
       <a href="#/jobs" data-nav="jobs">Jobs</a>
       <a href="#/photos" data-nav="photos">Photos</a>
+      <a href="#/server" data-nav="server">Server</a>
+      <a href="#/settings" data-nav="settings">Settings</a>
       <a href="#/docs" data-nav="docs">Docs</a>
     </nav>
+    <button class="btn btn-lock" type="button" id="btn-lock" hidden title="Lock the admin board on this device"><span class="lock-icon" aria-hidden="true"></span><span id="lock-left">Lock</span></button>
     <span class="live" id="live" title="Live updates">Connecting…</span>
   </header>
   <main id="main"><p class="muted">Loading…</p></main>
@@ -24,11 +32,25 @@
   <dialog id="dlg-key">
     <form method="dialog" id="form-key">
       <h2>Access key</h2>
-      <p class="muted">The server's ACCESS_KEY (in local.settings.json). It is kept in this browser only.</p>
+      <p class="muted">The same access key the iPads use (the server's ACCESS_KEY). It is kept in this browser only. Opened from the iPad app, it is taken from the app.</p>
       <input id="input-key" type="password" autocomplete="current-password" required>
       <p class="error" id="key-error"></p>
       <div class="actions"><button class="btn primary" type="submit">Open</button></div>
     </form>
+  </dialog>
+
+  <!-- The admin code keypad: the same 9-key pad as the iPad app's, so an iPad's soft keyboard never
+       comes up (there is no text field). A desk keyboard's digits, Backspace and Enter work too. -->
+  <dialog id="dlg-pin" class="pinpad">
+    <h2 id="pin-title">Admin code</h2>
+    <p class="muted" id="pin-note"></p>
+    <div class="pin-display" id="pin-display" aria-live="polite"></div>
+    <p class="error pin-error" id="pin-error"></p>
+    <div class="pin-keys" id="pin-keys"></div>
+    <div class="actions">
+      <button class="btn btn-lg" type="button" id="pin-cancel">Cancel</button>
+      <button class="btn btn-lg primary" type="button" id="pin-ok">Unlock</button>
+    </div>
   </dialog>
 
   <dialog id="dlg-photo" class="photo-dialog">

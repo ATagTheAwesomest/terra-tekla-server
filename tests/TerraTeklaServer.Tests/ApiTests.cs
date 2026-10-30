@@ -22,6 +22,7 @@ public sealed class ApiTests : IDisposable
             b.UseSetting("DATA_DIR", dataDir);
             b.UseSetting("CLIENT_ROOT", "");
             b.UseSetting("CONVERSION_URL", "");
+            b.UseSetting("SETTINGS_FILE", Path.Combine(dataDir, "local.settings.json"));
         });
     }
 

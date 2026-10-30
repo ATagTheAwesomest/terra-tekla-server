@@ -11,5 +11,7 @@
   "PHOTOS_RULES": "photo-rules.json",
   "PHOTOS_MAX_MB": "25",
   "PHOTOS_MAX_PER_UPLOAD": "20",
-  "PHOTOS_TYPES": "jpg,png,heic,webp,pdf"
+  "PHOTOS_TYPES": "jpg,png,heic,webp,pdf",
+  "ADMIN_LOCK_MINUTES": "30",
+  "SERVER_REPO": "C:\\src\\terra-tekla-server"
 }

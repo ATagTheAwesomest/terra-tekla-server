@@ -418,6 +418,67 @@ public sealed class Store
             ("$dev", deviceId), ("$limit", Math.Clamp(limit, 1, 200)));
     }
 
+    // ---- Admin page: Server view ------------------------------------------------------
+
+    /// <summary>
+    /// What the database holds and how busy the iPads have been: row counts, scans and refusals per
+    /// day for the last 14 days, what kinds of things happened in the last 7, and each iPad's scans.
+    /// Days are the server's local days.
+    /// </summary>
+    public object Stats()
+    {
+        using var db = Open();
+        long Count(string sql) => Convert.ToInt64(Scalar(db, sql) ?? 0L);
+        var since14 = DateTime.UtcNow.Date.AddDays(-14).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var since7 = DateTime.UtcNow.AddDays(-7).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var today = DateTime.Today.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        return new
+        {
+            counts = new
+            {
+                devices = Count("SELECT COUNT(*) FROM devices"),
+                jobs = Count("SELECT COUNT(DISTINCT job) FROM loads"),
+                loads = Count("SELECT COUNT(*) FROM loads"),
+                stacks = Count("SELECT COUNT(*) FROM stacks"),
+                pieces = Count("SELECT COUNT(*) FROM entries"),
+                checkScans = Count("SELECT COUNT(*) FROM check_scans"),
+                activity = Count("SELECT COUNT(*) FROM activity"),
+                photos = Count("SELECT COUNT(*) FROM photos WHERE deleted_at IS NULL"),
+                photoBytes = Count("SELECT COALESCE(SUM(bytes), 0) FROM photos WHERE deleted_at IS NULL"),
+            },
+            today = new
+            {
+                scans = Convert.ToInt64(Scalar(db, "SELECT COUNT(*) FROM activity WHERE kind = 'scan' AND at >= $t", ("$t", today)) ?? 0L),
+                refused = Convert.ToInt64(Scalar(db, "SELECT COUNT(*) FROM activity WHERE kind = 'refused' AND at >= $t", ("$t", today)) ?? 0L),
+                photos = Convert.ToInt64(Scalar(db, "SELECT COUNT(*) FROM photos WHERE taken_at >= $t", ("$t", today)) ?? 0L),
+                checks = Convert.ToInt64(Scalar(db, "SELECT COUNT(*) FROM activity WHERE kind = 'check' AND at >= $t", ("$t", today)) ?? 0L),
+            },
+            days = Rows(db, """
+                SELECT date(at, 'localtime') AS day,
+                       SUM(kind = 'scan'), SUM(kind = 'refused'), SUM(kind = 'check'), SUM(kind = 'photo')
+                FROM activity WHERE at >= $since GROUP BY day ORDER BY day
+                """, r => new { day = r.GetString(0), scans = r.GetInt64(1), refused = r.GetInt64(2), checks = r.GetInt64(3), photos = r.GetInt64(4) },
+                ("$since", since14)),
+            kinds = Rows(db, "SELECT kind, COUNT(*) FROM activity WHERE at >= $since GROUP BY kind ORDER BY COUNT(*) DESC",
+                r => new { kind = r.GetString(0), count = r.GetInt64(1) }, ("$since", since7)),
+            byDevice = Rows(db, """
+                SELECT device_id, MAX(device_name), SUM(at >= $today), COUNT(*), MAX(at)
+                FROM activity WHERE kind = 'scan' AND at >= $since AND device_id IS NOT NULL
+                GROUP BY device_id ORDER BY COUNT(*) DESC
+                """, r => new { deviceId = r.GetString(0), deviceName = N(r, 1), today = r.GetInt64(2), week = r.GetInt64(3), lastAt = N(r, 4) },
+                ("$since", since7), ("$today", today)),
+        };
+    }
+
+    /// <summary>A consistent copy of the whole database, taken while it is in use.</summary>
+    public void Backup(string targetPath)
+    {
+        using var db = Open();
+        using var target = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = targetPath, Pooling = false }.ToString());
+        target.Open();
+        db.BackupDatabase(target);
+    }
+
     // ---- SQL helpers -------------------------------------------------------------------
 
     static string? N(SqliteDataReader r, int i) => r.IsDBNull(i) ? null : r.GetString(i);

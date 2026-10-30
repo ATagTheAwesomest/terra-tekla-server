@@ -12,8 +12,13 @@ The shop's own server for the TERRA iPad app
 - **Passes PowerFab calls through** to
   [tekla-conversion-layer](https://github.com/ATagTheAwesomest/tekla-conversion-layer), which stays
   a plain PowerFab REST converter. Its key stays on this server.
-- **Admin page** at `/admin/`: every device (rename, recolour, what it did recently), jobs and loads
-  with their stacks and who scanned what, photos, server status and the docs.
+- **Admin board** at `/admin/`, installable as an app: every device (rename, recolour, what it did
+  recently), the PowerFab jobs it can reach, loads with their stacks and who scanned what, photos,
+  server stats and health, settings (server settings, photo folder rules, backup, restart, updates)
+  and the docs. Needs the iPads' access key and an admin code entered on an on-screen keypad, which
+  unlocks that device for 30 minutes.
+- **Updates from the admin board or an iPad**: `windows/update-client.ps1` gets the newest iPad app
+  into `CLIENT_ROOT`; `windows/deploy.ps1` updates the server and then runs it.
 
 ```
 iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conversion-layer ──► PowerFab
@@ -65,6 +70,10 @@ repo in an elevated PowerShell:
 | `src/TerraTeklaServer/Store.cs` | SQLite database |
 | `src/TerraTeklaServer/Hub.cs` | Live connections |
 | `src/TerraTeklaServer/PhotoStore.cs` | Photo folders and rules |
+| `src/TerraTeklaServer/AdminLock.cs` | The admin code (hashed) and its sessions |
+| `src/TerraTeklaServer/SettingsFile.cs` | Reading, checking and saving `local.settings.json` from the admin page |
+| `src/TerraTeklaServer/ServerStats.cs` | Request, error and log figures for the Server view |
+| `src/TerraTeklaServer/Updater.cs` | Runs `update-client.ps1` / `deploy.ps1` when asked from the admin board or an iPad |
 | `src/TerraTeklaServer/wwwroot/admin/` | Admin page |
 | `tools/fake-powerfab.mjs` | Fake conversion layer for testing |
 | `windows/` | Service install, deploy and release scripts, example settings |
