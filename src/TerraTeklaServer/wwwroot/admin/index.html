@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TERRA server</title>
+  <meta name="theme-color" content="#121212">
+  <link rel="stylesheet" href="admin.css">
+  <script type="module" src="admin.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#/">TERRA <span>server</span></a>
+    <nav>
+      <a href="#/" data-nav="home">Devices &amp; activity</a>
+      <a href="#/jobs" data-nav="jobs">Jobs</a>
+      <a href="#/photos" data-nav="photos">Photos</a>
+      <a href="#/docs" data-nav="docs">Docs</a>
+    </nav>
+    <span class="live" id="live" title="Live updates">Connecting…</span>
+  </header>
+  <main id="main"><p class="muted">Loading…</p></main>
+
+  <dialog id="dlg-key">
+    <form method="dialog" id="form-key">
+      <h2>Access key</h2>
+      <p class="muted">The server's ACCESS_KEY (in local.settings.json). It is kept in this browser only.</p>
+      <input id="input-key" type="password" autocomplete="current-password" required>
+      <p class="error" id="key-error"></p>
+      <div class="actions"><button class="btn primary" type="submit">Open</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-photo" class="photo-dialog">
+    <div class="photo-head"><span id="photo-title"></span><button class="btn" type="button" id="btn-photo-close">Close</button></div>
+    <img id="photo-img" alt="">
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,24 @@
+// Copy to photo-rules.json next to TerraTeklaServer.exe (or point PHOTOS_RULES at it) and edit.
+// The service re-reads it when it changes; no restart needed. Comments and trailing commas are fine.
+// Full description: PHOTOS.md next to the exe, or the admin page (Docs > Photos).
+{
+  // Where a job's files go when no rule below matches. Leave it out to use PHOTOS_ROOT\{job}.
+  "default": "D:\\TerraPhotos\\{job}",
+
+  // The folder inside the job folder, one per load. {load} is the load number from the app ("8").
+  "loadFolder": "Load {load}",
+
+  // Checked top to bottom; the first "match" (a .NET regex, case-insensitive) that matches the
+  // job number wins. "folder" is the job's folder and must be a full path. It can use {job} and
+  // the regex's groups: named ones like {year}, or plain ( ) groups as {1}, {2}...
+  "rules": [
+    // Jobs 25-001, 25-002...: a 2025 projects share.
+    { "match": "^25-\\d+$", "folder": "\\\\fileserver\\Projects 2025\\{job}\\Shipping Photos" },
+
+    // Jobs 26101, 26102...: \\fileserver\Jobs\2026\26101\Photos (year taken from the job number).
+    { "match": "^(?<year>\\d{2})\\d{3}$", "folder": "\\\\fileserver\\Jobs\\20{year}\\{job}\\Photos" },
+
+    // One job by name.
+    { "match": "^EPM-001$", "folder": "E:\\Special\\EPM\\Load photos" }
+  ]
+}

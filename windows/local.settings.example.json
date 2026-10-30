@@ -1,0 +1,15 @@
+{
+  "Urls": "http://0.0.0.0:8095",
+  "ACCESS_KEY": "",
+  "CONVERSION_URL": "http://127.0.0.1:8090",
+  "CONVERSION_KEY": "",
+  "CLIENT_ROOT": "C:\\TerraTeklaClient",
+  "DATA_DIR": "data",
+  "CORS_ORIGINS": "",
+  "PHOTOS_ENABLED": "false",
+  "PHOTOS_ROOT": "D:\\TerraPhotos",
+  "PHOTOS_RULES": "photo-rules.json",
+  "PHOTOS_MAX_MB": "25",
+  "PHOTOS_MAX_PER_UPLOAD": "20",
+  "PHOTOS_TYPES": "jpg,png,heic,webp,pdf"
+}
