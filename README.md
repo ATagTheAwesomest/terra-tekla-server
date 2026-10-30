@@ -30,6 +30,9 @@ iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conve
   works, every endpoint and live message, the operations, the database schema, testing without
   PowerFab, and a setup checklist.
 - [docs/PHOTOS.md](docs/PHOTOS.md): photo settings, folder rules, naming, the photo API.
+- [docs/MIGRATION.md](docs/MIGRATION.md): moving from the old setup (conversion layer on the internet,
+  app on GitHub Pages) to this server: `windows\migrate-from-conversion-layer.ps1`, the Cloudflare
+  hostname, paths and settings, Cloudflare Access, the iPads and the admin board, what data carries over.
 
 Both ship next to the exe and show on the admin page (Docs).
 
