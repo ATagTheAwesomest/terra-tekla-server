@@ -15,8 +15,11 @@
       <a href="#/" data-nav="home">Devices &amp; activity</a>
       <a href="#/jobs" data-nav="jobs">Jobs</a>
       <a href="#/photos" data-nav="photos">Photos</a>
+      <a href="#/server" data-nav="server"><span class="lock-icon" aria-hidden="true"></span>Server</a>
+      <a href="#/settings" data-nav="settings"><span class="lock-icon" aria-hidden="true"></span>Settings</a>
       <a href="#/docs" data-nav="docs">Docs</a>
     </nav>
+    <button class="btn btn-lock" type="button" id="btn-lock" hidden>Lock</button>
     <span class="live" id="live" title="Live updates">Connecting…</span>
   </header>
   <main id="main"><p class="muted">Loading…</p></main>
@@ -29,6 +32,20 @@
       <p class="error" id="key-error"></p>
       <div class="actions"><button class="btn primary" type="submit">Open</button></div>
     </form>
+  </dialog>
+
+  <!-- The admin code keypad: the same 9-key pad as the iPad app's, so an iPad's soft keyboard never
+       comes up (there is no text field). A desk keyboard's digits, Backspace and Enter work too. -->
+  <dialog id="dlg-pin" class="pinpad">
+    <h2 id="pin-title">Admin code</h2>
+    <p class="muted" id="pin-note"></p>
+    <div class="pin-display" id="pin-display" aria-live="polite"></div>
+    <p class="error pin-error" id="pin-error"></p>
+    <div class="pin-keys" id="pin-keys"></div>
+    <div class="actions">
+      <button class="btn btn-lg" type="button" id="pin-cancel">Cancel</button>
+      <button class="btn btn-lg primary" type="button" id="pin-ok">Unlock</button>
+    </div>
   </dialog>
 
   <dialog id="dlg-photo" class="photo-dialog">

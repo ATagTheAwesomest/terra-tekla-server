@@ -95,10 +95,12 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
     }
 
     /// <summary>The folder a job's files go in, and which rule picked it ("default" when none did).</summary>
-    public (string Folder, string Rule) JobFolder(string job)
+    public (string Folder, string Rule) JobFolder(string job) => JobFolder(job, LoadRules());
+
+    /// <summary>The folder a job's files would go in under a given set of rules (the admin page's test).</summary>
+    public (string Folder, string Rule) JobFolder(string job, FileRules rules)
     {
         job = CleanName(job, "Job");
-        var rules = LoadRules();
         foreach (var rule in rules.Rules)
         {
             Match match;
@@ -117,12 +119,14 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
     }
 
     /// <summary>The folder a load's files go in: the job folder plus the load folder.</summary>
-    public string LoadFolder(string job, string load)
+    public string LoadFolder(string job, string load) => LoadFolder(job, load, LoadRules());
+
+    public string LoadFolder(string job, string load, FileRules rules)
     {
         job = CleanName(job, "Job");
         load = CleanName(load, "Load");
-        var jobFolder = JobFolder(job).Folder;
-        var loadName = CleanName(Fill(LoadRules().LoadFolder, job, load, null, "loadFolder", folder: false), "Load folder");
+        var jobFolder = JobFolder(job, rules).Folder;
+        var loadName = CleanName(Fill(rules.LoadFolder, job, load, null, "loadFolder", folder: false), "Load folder");
         return Inside(jobFolder, Path.Combine(jobFolder, loadName));
     }
 
@@ -311,6 +315,45 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
         return full;
     }
 
+    /// <summary>The rules file as it is now (throws <see cref="PhotoRulesException"/> when it is broken).</summary>
+    public FileRules Rules() => LoadRules();
+
+    /// <summary>
+    /// Writes the rules file from the admin page, after checking every regex and that each folder only
+    /// uses placeholders it can fill. The old file (comments and all) is kept as photo-rules.json.bak.
+    /// Takes effect at once: the file is re-read when it changes.
+    /// </summary>
+    public FileRules SaveRules(string? defaultFolder, string? loadFolder, IReadOnlyList<(string Match, string Folder)> rules)
+    {
+        var json = new System.Text.Json.Nodes.JsonObject();
+        if (!string.IsNullOrWhiteSpace(defaultFolder))
+            json["default"] = defaultFolder.Trim();
+        json["loadFolder"] = string.IsNullOrWhiteSpace(loadFolder) ? "{load}" : loadFolder.Trim();
+        json["rules"] = new System.Text.Json.Nodes.JsonArray(rules.Select(r => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject
+        {
+            ["match"] = r.Match.Trim(),
+            ["folder"] = r.Folder.Trim(),
+        }).ToArray());
+        // Relaxed escaping keeps regexes readable in the file ("<" rather than "\u003C").
+        var text = json.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        var parsed = FileRules.Parse(text, "The rules");
+        parsed.Validate();
+
+        lock (rulesLock)
+        {
+            var path = settings.RulesPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            if (File.Exists(path))
+                File.Copy(path, path + ".bak", overwrite: true);
+            var temp = path + $".{Guid.NewGuid():N}.tmp";
+            File.WriteAllText(temp, text);
+            File.Move(temp, path, overwrite: true);
+            cached = null;
+        }
+        log.LogInformation("Photo folder rules saved from the admin page ({Count} rules)", parsed.Rules.Count);
+        return parsed;
+    }
+
     // The rules file, re-read whenever it changes on disk. No file means no rules.
     FileRules LoadRules()
     {
@@ -367,6 +410,30 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
             }
             var loadFolder = string.IsNullOrWhiteSpace(raw?.LoadFolder) ? "{load}" : raw.LoadFolder.Trim();
             return new FileRules(string.IsNullOrWhiteSpace(raw?.Default) ? null : raw.Default.Trim(), loadFolder, rules);
+        }
+
+        /// <summary>
+        /// Checks each folder only uses placeholders it can fill: {job} and the rule's regex groups in a
+        /// rule, {job} in the default, {job} and {load} in the load folder.
+        /// </summary>
+        public void Validate()
+        {
+            static void Only(string template, string where, IEnumerable<string> allowed, bool rooted)
+            {
+                var names = allowed.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (Match m in Placeholder.Matches(template))
+                    if (!names.Contains(m.Groups[1].Value))
+                        throw new PhotoRulesException($"{where} uses {{{m.Groups[1].Value}}}, which isn't {string.Join(", ", names.Select(n => $"{{{n}}}"))}.");
+                if (rooted && !(template.StartsWith('{') || Path.IsPathRooted(template) || template.StartsWith(@"\\") || Regex.IsMatch(template, @"^[A-Za-z]:[\\/]")))
+                    throw new PhotoRulesException($"{where} must be a full path (C:\\..., D:\\..., or \\\\server\\share\\...).");
+            }
+            foreach (var (rule, i) in Rules.Select((r, i) => (r, i + 1)))
+                Only(rule.Folder, $"Rule {i}'s folder", rule.Regex.GetGroupNames().Where(g => g != "0").Append("job"), rooted: true);
+            if (Default is not null)
+                Only(Default, "The default folder", ["job"], rooted: true);
+            Only(LoadFolder, "The load folder", ["job", "load"], rooted: false);
+            if (LoadFolder.IndexOfAny(['/', '\\']) >= 0)
+                throw new PhotoRulesException("The load folder is one folder name: it can't have / or \\ in it.");
         }
 
         sealed record RulesJson(string? Default, string? LoadFolder, List<RuleJson>? Rules);

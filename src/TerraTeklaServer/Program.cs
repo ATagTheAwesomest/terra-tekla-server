@@ -16,11 +16,20 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot"),
 });
 builder.Host.UseWindowsService(o => o.ServiceName = "TerraTeklaServer");
-// Same keys as the environment variables in docs/SETUP.md. The Windows service reads this file.
-builder.Configuration.AddJsonFile("local.settings.json", optional: true, reloadOnChange: false);
+// Same keys as the environment variables in docs/SETUP.md. The Windows service reads this file, and
+// the admin page's Settings write to it (SETTINGS_FILE only moves it, for tests).
+var settingsPath = builder.Configuration["SETTINGS_FILE"] is { Length: > 0 } custom
+    ? Path.GetFullPath(custom, AppContext.BaseDirectory)
+    : Path.Combine(AppContext.BaseDirectory, "local.settings.json");
+builder.Configuration.AddJsonFile(settingsPath, optional: true, reloadOnChange: false);
 var settings = Settings.From(builder.Configuration);
+var serverStats = new ServerStats();
+builder.Logging.AddProvider(new StatsLoggerProvider(serverStats));
 
 builder.Services.AddSingleton(settings);
+builder.Services.AddSingleton(serverStats);
+builder.Services.AddSingleton(new SettingsFile(settingsPath, builder.Configuration));
+builder.Services.AddSingleton<AdminLock>();
 builder.Services.AddSingleton(settings.Photos);
 builder.Services.AddSingleton<PhotoStore>();
 builder.Services.AddSingleton<Store>();
@@ -29,12 +38,14 @@ builder.Services.AddHttpClient("conversion", c => c.Timeout = TimeSpan.FromSecon
 var uploadLimit = settings.Photos.MaxBytes * settings.Photos.MaxFiles + 1024 * 1024;
 builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = uploadLimit);
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
-    policy.WithOrigins(settings.CorsOrigins).WithHeaders("Authorization", "Content-Type", "X-Terra-Device", "X-Terra-Version").WithMethods("GET", "POST", "PUT", "DELETE")));
+    policy.WithOrigins(settings.CorsOrigins).WithHeaders("Authorization", "Content-Type", "X-Terra-Device", "X-Terra-Version", AdminLock.Header).WithMethods("GET", "POST", "PUT", "DELETE")));
 
 var app = builder.Build();
 var store = app.Services.GetRequiredService<Store>();
 var hub = app.Services.GetRequiredService<Hub>();
 var photos = app.Services.GetRequiredService<PhotoStore>();
+var settingsFile = app.Services.GetRequiredService<SettingsFile>();
+var adminLock = app.Services.GetRequiredService<AdminLock>();
 var version = typeof(Store).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
 if (settings.AccessKey == "")
@@ -46,6 +57,7 @@ if (settings.ClientRoot == "" || !File.Exists(Path.Combine(settings.ClientRoot, 
 
 hub.Changed += () => hub.Broadcast(new { type = "devices", devices = DeviceList() });
 
+app.UseRequestStats(serverStats);
 app.UseCors();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
 
@@ -127,24 +139,62 @@ api.MapPost("/powerfab/{command}", async (string command, HttpContext http, IHtt
     Me(http);
     using var body = new StreamReader(http.Request.Body);
     var json = await body.ReadToEndAsync(http.RequestAborted);
-    using var request = new HttpRequestMessage(HttpMethod.Post, $"{settings.ConversionUrl}/api/powerfab/{command}")
+    var reply = await PowerFabAsync(factory, command, json, http.RequestAborted);
+    return reply.Error is { } error
+        ? Results.Problem(error, statusCode: 502)
+        : Results.Content(reply.Body, reply.ContentType ?? "application/json", Encoding.UTF8, reply.Status);
+});
+
+// The admin page's Jobs: every job PowerFab lets this server's API user reach (the same list the iPads
+// pick from), with what this server has for each and where its photos go.
+api.MapGet("/jobs/powerfab", async (IHttpClientFactory factory, CancellationToken ct) =>
+{
+    var mine = store.Jobs().ToDictionary(j => j.Job, StringComparer.OrdinalIgnoreCase);
+    List<(string Number, string Description, string Location)> found = [];
+    string? error = null;
+    if (settings.ConversionUrl == "")
+        error = "This server has no CONVERSION_URL, so PowerFab can't be reached.";
+    else
     {
-        Content = new StringContent(json == "" ? "{}" : json, Encoding.UTF8, "application/json"),
-    };
-    request.Headers.Authorization = new("Bearer", settings.ConversionKey);
-    try
-    {
-        using var reply = await factory.CreateClient("conversion").SendAsync(request, http.RequestAborted);
-        var text = await reply.Content.ReadAsStringAsync(http.RequestAborted);
-        // The conversion layer's own 401 means CONVERSION_KEY is wrong: not the iPad's fault.
-        if (reply.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-            return Results.Problem("The PowerFab bridge refused this server's key (CONVERSION_KEY).", statusCode: 502);
-        return Results.Content(text, reply.Content.Headers.ContentType?.ToString() ?? "application/json", Encoding.UTF8, (int)reply.StatusCode);
+        var reply = await PowerFabAsync(factory, "ProductionControlJob_Get", "{}", ct);
+        error = reply.Error ?? (reply.Status >= 400 ? $"PowerFab answered {reply.Status}: {Trim(reply.Body, 300)}" : null);
+        if (error is null)
+        {
+            try
+            {
+                found = PowerFabJobs(JsonNode.Parse(reply.Body));
+            }
+            catch (JsonException ex)
+            {
+                error = $"PowerFab's job list couldn't be read: {ex.Message}";
+            }
+        }
     }
-    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !http.RequestAborted.IsCancellationRequested)
-    {
-        return Results.Problem($"Can’t reach the PowerFab bridge (tekla-conversion-layer): {ex.Message}", statusCode: 502);
-    }
+    var rows = found.Select(j => (j.Number, j.Description, j.Location, InPowerFab: true))
+        .Concat(mine.Keys.Where(k => !found.Any(f => f.Number.Equals(k, StringComparison.OrdinalIgnoreCase))).Select(k => (Number: k, Description: "", Location: "", InPowerFab: false)))
+        .OrderByDescending(j => j.Number, NumericOrder.Instance)
+        .Select(j =>
+        {
+            mine.TryGetValue(j.Number, out var m);
+            string? folder = null, rule = null, folderError = null;
+            if (settings.Photos.Enabled)
+            {
+                try
+                {
+                    (folder, rule) = photos.JobFolder(j.Number);
+                }
+                catch (Exception ex) when (ex is BadNameException or PhotoRulesException)
+                {
+                    folderError = ex.Message;
+                }
+            }
+            return new
+            {
+                job = j.Number, description = j.Description, location = j.Location, inPowerFab = j.InPowerFab,
+                loads = m.Loads, pieces = m.Pieces, lastAt = m.LastAt, photoFolder = folder, photoRule = rule, photoError = folderError,
+            };
+        });
+    return Results.Json(new { ok = error is null, error, fetchedAt = DateTime.UtcNow, photosEnabled = settings.Photos.Enabled, jobs = rows });
 });
 
 // This device: who it is (made the first time it is seen) and renaming it.
@@ -155,14 +205,16 @@ api.MapPut("/me", (HttpContext http, DeviceUpdate update) =>
     return DeviceChange(me.Id, update, me);
 });
 
+// A quick "is everything up" for the admin page's front page. The details (folders, database, load,
+// errors) are in /api/admin/stats, behind the admin code.
 api.MapGet("/status", async (IHttpClientFactory http) => new
 {
     version,
     accessKeySet = settings.AccessKey != "",
-    client = new { root = settings.ClientRoot, served = File.Exists(Path.Combine(settings.ClientRoot, "index.html")), version = ClientVersion() },
+    client = new { served = File.Exists(Path.Combine(settings.ClientRoot, "index.html")), version = ClientVersion() },
     photosEnabled = settings.Photos.Enabled,
-    conversion = await ConversionHealth(http),
-    database = settings.DatabasePath,
+    conversion = await ConversionHealth(http, settings.ConversionUrl),
+    adminPinSet = adminLock.PinSet,
 });
 
 api.MapGet("/devices", () => DeviceList());
@@ -202,6 +254,210 @@ api.MapGet("/activity", (string? device, string? job, string? load, string? mark
 api.MapGet("/docs/{name}", (string name) => Doc(name) is { } text
     ? Results.Text(text, "text/markdown; charset=utf-8")
     : Results.NotFound());
+
+// ---- Admin code, settings and server stats (docs/SETUP.md, "Admin page") --------------------
+// Everything under /api/admin needs the access key like the rest of /api, and all but the routes
+// that check the code itself also need X-Terra-Admin: a token from entering the admin code.
+
+var adminOpen = api.MapGroup("/admin");
+adminOpen.MapGet("/lock", (HttpContext http) => new
+{
+    pinSet = adminLock.PinSet,
+    unlocked = adminLock.Valid(AdminToken(http)),
+    lockMinutes = (int)adminLock.Idle.TotalMinutes,
+    retryAfter = adminLock.RetryAfter,
+});
+// The first code, while none is set. After that it can only be changed with the current one.
+adminOpen.MapPost("/setup", (PinRequest body) =>
+{
+    try
+    {
+        var token = adminLock.Setup(body.Pin ?? "");
+        store.Log(AdminDevice, "admin", "Set the admin code");
+        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+    }
+    catch (BadPinException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 409);
+    }
+});
+adminOpen.MapPost("/unlock", (PinRequest body) =>
+{
+    if (!adminLock.PinSet)
+        return Results.Problem("No admin code is set yet.", statusCode: 409);
+    if (adminLock.RetryAfter is > 0 and var wait)
+        return TooManyTries(wait);
+    if (adminLock.Unlock(body.Pin ?? "") is { } token)
+        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+    return adminLock.RetryAfter is > 0 and var blocked ? TooManyTries(blocked) : Results.Problem("That code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
+});
+adminOpen.MapPost("/lock", (HttpContext http) =>
+{
+    adminLock.Lock(AdminToken(http));
+    return Results.NoContent();
+});
+
+var admin = api.MapGroup("/admin").AddEndpointFilter(async (context, next) =>
+    adminLock.Valid(AdminToken(context.HttpContext))
+        ? await next(context)
+        : Results.Problem(adminLock.PinSet ? "Locked: enter the admin code." : "Set an admin code first.", statusCode: 403,
+            extensions: new Dictionary<string, object?> { ["locked"] = true, ["pinSet"] = adminLock.PinSet }));
+
+admin.MapPut("/pin", (PinChange body) =>
+{
+    if (adminLock.RetryAfter is > 0 and var wait)
+        return TooManyTries(wait);
+    try
+    {
+        if (adminLock.Change(body.Current ?? "", body.Pin ?? "") is not { } token)
+            return Results.Problem("The current code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
+        store.Log(AdminDevice, "admin", "Changed the admin code");
+        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+    }
+    catch (BadPinException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+admin.MapGet("/settings", () => SettingsView());
+admin.MapPut("/settings", (Dictionary<string, string?> changes) =>
+{
+    try
+    {
+        var clean = settingsFile.Validate(changes);
+        var changed = clean.Where(c => settingsFile.Current(c.Key) != c.Value).ToDictionary(c => c.Key, c => c.Value);
+        if (changed.Count > 0)
+        {
+            settingsFile.Write(changed);
+            var labels = changed.Keys.Select(k => SettingsFile.Editable.First(s => s.Key == k).Label);
+            var item = store.Log(AdminDevice, "settings", $"Changed settings: {string.Join(", ", labels)}");
+            hub.Broadcast(new { type = "activity", items = new[] { item } });
+            app.Logger.LogWarning("Settings changed from the admin page: {Keys}", string.Join(", ", changed.Keys));
+        }
+        return Results.Json(SettingsView());
+    }
+    catch (BadSettingException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// Whether an address answers like tekla-conversion-layer, before it is saved.
+admin.MapPost("/test-conversion", async (UrlRequest body, IHttpClientFactory factory) =>
+{
+    var url = (body.Url ?? "").Trim().TrimEnd('/');
+    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+        return Results.Problem("That isn't an http:// or https:// address.", statusCode: 400);
+    return Results.Json(await ConversionHealth(factory, url));
+});
+
+admin.MapGet("/photo-rules", () => RulesView());
+admin.MapPut("/photo-rules", (RulesRequest body) =>
+{
+    try
+    {
+        var saved = photos.SaveRules(body.Default, body.LoadFolder, (body.Rules ?? []).Select(r => (r.Match ?? "", r.Folder ?? "")).ToList());
+        var item = store.Log(AdminDevice, "settings", $"Changed the photo folder rules ({saved.Rules.Count} rule{(saved.Rules.Count == 1 ? "" : "s")})");
+        hub.Broadcast(new { type = "activity", items = new[] { item } });
+        return Results.Json(RulesView());
+    }
+    catch (PhotoRulesException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+// Where a job's (and load's) photos would go under the rules on screen, saved or not.
+admin.MapPost("/photo-rules/test", (RulesTest body) =>
+{
+    try
+    {
+        var rules = body.Rules is null ? photos.Rules() : PhotoStore.FileRules.Parse(JsonSerializer.Serialize(new
+        {
+            @default = string.IsNullOrWhiteSpace(body.Default) ? null : body.Default,
+            loadFolder = body.LoadFolder,
+            rules = body.Rules.Select(r => new { match = r.Match, folder = r.Folder }),
+        }), "The rules");
+        rules.Validate();
+        var (folder, rule) = photos.JobFolder(body.Job ?? "", rules);
+        var load = string.IsNullOrWhiteSpace(body.Load) ? "8" : body.Load.Trim();
+        return Results.Json(new { job = body.Job, folder, rule, load, loadFolder = photos.LoadFolder(body.Job ?? "", load, rules) });
+    }
+    catch (Exception ex) when (ex is BadNameException or PhotoRulesException)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+admin.MapGet("/stats", async (IHttpClientFactory factory) =>
+{
+    var db = new FileInfo(settings.DatabasePath);
+    var wal = new FileInfo(settings.DatabasePath + "-wal");
+    string? rulesError = null;
+    var ruleCount = 0;
+    try
+    {
+        ruleCount = photos.Rules().Rules.Count;
+    }
+    catch (PhotoRulesException ex)
+    {
+        rulesError = ex.Message;
+    }
+    var online = hub.Online();
+    return Results.Json(new
+    {
+        version,
+        process = serverStats.Process(),
+        requests = serverStats.Snapshot(),
+        connections = new { ipads = online.Count, admins = hub.AdminCount, devices = store.Devices().Count },
+        database = new
+        {
+            path = settings.DatabasePath,
+            bytes = db.Exists ? db.Length : 0,
+            walBytes = wal.Exists ? wal.Length : 0,
+            data = store.Stats(),
+        },
+        disks = new[] { ("Database", (string?)settings.DataDir), ("Photos", settings.Photos.Enabled ? settings.Photos.Root : null) }
+            .Select(d => new { name = d.Item1, disk = ServerStats.Disk(d.Item2) })
+            .Where(d => d.disk is not null),
+        conversion = await ConversionHealth(factory, settings.ConversionUrl),
+        client = new { root = settings.ClientRoot, served = File.Exists(Path.Combine(settings.ClientRoot, "index.html")), version = ClientVersion() },
+        photos = new { enabled = settings.Photos.Enabled, root = settings.Photos.Root, rulesPath = settings.Photos.RulesPath, rules = ruleCount, rulesError },
+        accessKeySet = settings.AccessKey != "",
+        restartNeeded = RestartNeeded().Count > 0,
+    }, Json.Options);
+});
+
+// A copy of the database to keep somewhere else.
+admin.MapGet("/backup", () =>
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"terra-backup-{Guid.NewGuid():N}.db");
+    store.Backup(temp);
+    app.Logger.LogInformation("Database backup downloaded from the admin page");
+    var stream = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 81920, FileOptions.DeleteOnClose);
+    return Results.File(stream, "application/vnd.sqlite3", $"terra-backup-{DateTime.Now:yyyyMMdd-HHmm}.db");
+});
+
+// Restarts the service so changed settings take effect. The process exits with an error code and
+// Windows starts it again (the service's "restart after a crash", set by install-service.ps1).
+admin.MapPost("/restart", () =>
+{
+    if (!Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
+        return Results.Problem("This server isn't running as the Windows service, so nothing would start it again. Restart it by hand.", statusCode: 409);
+    var item = store.Log(AdminDevice, "admin", "Restarted the server");
+    hub.Broadcast(new { type = "activity", items = new[] { item } });
+    app.Logger.LogWarning("Restarting: asked for on the admin page.");
+    _ = Task.Run(async () =>
+    {
+        await Task.Delay(1500);
+        Environment.Exit(1);
+    });
+    return Results.Json(new { restarting = true }, statusCode: 202);
+});
 
 // ---- Photos (docs/PHOTOS.md) -----------------------------------------------------------------
 
@@ -385,20 +641,137 @@ static async Task<JsonObject?> ReadHelloAsync(WebSocket socket, CancellationToke
     }
 }
 
-async Task<object> ConversionHealth(IHttpClientFactory factory)
+async Task<object> ConversionHealth(IHttpClientFactory factory, string url)
 {
-    if (settings.ConversionUrl == "")
-        return new { ok = false, error = "CONVERSION_URL is not set" };
+    if (url == "")
+        return new { ok = false, error = "CONVERSION_URL is not set", ms = 0L };
+    var watch = System.Diagnostics.Stopwatch.StartNew();
     try
     {
         var client = factory.CreateClient("conversion");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var health = await client.GetFromJsonAsync<JsonObject>($"{settings.ConversionUrl}/health", cts.Token);
-        return new { ok = true, health };
+        var health = await client.GetFromJsonAsync<JsonObject>($"{url}/health", cts.Token);
+        return new { ok = true, health, ms = watch.ElapsedMilliseconds };
     }
     catch (Exception ex)
     {
-        return new { ok = false, error = ex.Message };
+        return new { ok = false, error = ex.Message, ms = watch.ElapsedMilliseconds };
+    }
+}
+
+// One PowerFab command through tekla-conversion-layer, with this server's CONVERSION_KEY. Error is set
+// when the bridge couldn't be reached or refused the key (both 502 for the caller).
+async Task<(int Status, string Body, string? ContentType, string? Error)> PowerFabAsync(IHttpClientFactory factory, string command, string json, CancellationToken ct)
+{
+    using var request = new HttpRequestMessage(HttpMethod.Post, $"{settings.ConversionUrl}/api/powerfab/{command}")
+    {
+        Content = new StringContent(json == "" ? "{}" : json, Encoding.UTF8, "application/json"),
+    };
+    request.Headers.Authorization = new("Bearer", settings.ConversionKey);
+    try
+    {
+        using var reply = await factory.CreateClient("conversion").SendAsync(request, ct);
+        var text = await reply.Content.ReadAsStringAsync(ct);
+        // The conversion layer's own 401 means CONVERSION_KEY is wrong: not the iPad's fault.
+        if (reply.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            return (502, "", null, "The PowerFab bridge refused this server's key (CONVERSION_KEY).");
+        return ((int)reply.StatusCode, text, reply.Content.Headers.ContentType?.ToString(), null);
+    }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
+    {
+        return (502, "", null, $"Can’t reach the PowerFab bridge (tekla-conversion-layer): {ex.Message}");
+    }
+}
+
+// Every ProductionControlJob in a PowerFab reply, wherever it sits (one object or a list), as the app's
+// js/api.js parseJobs reads them.
+static List<(string Number, string Description, string Location)> PowerFabJobs(JsonNode? reply)
+{
+    var jobs = new List<(string, string, string)>();
+    void Walk(JsonNode? node)
+    {
+        if (node is JsonArray array)
+            foreach (var n in array)
+                Walk(n);
+        else if (node is JsonObject obj)
+            foreach (var (key, value) in obj)
+            {
+                if (key == "ProductionControlJob")
+                    foreach (var job in value is JsonArray list ? list.ToArray() : [value])
+                        if (job is JsonObject j && Text(j["JobNumber"]) is { Length: > 0 } number)
+                            jobs.Add((number, Text(j["JobDescription"]), Text(j["JobLocation"])));
+                Walk(value);
+            }
+    }
+    Walk(reply);
+    return jobs.DistinctBy(j => j.Item1, StringComparer.OrdinalIgnoreCase).ToList();
+}
+
+static string Text(JsonNode? node) => (node switch
+{
+    JsonValue v => v.ToString(),
+    JsonObject o when o["#text"] is JsonValue t => t.ToString(),
+    _ => "",
+}).Trim();
+
+static string Trim(string text, int max) => text.Length > max ? text[..max] + "…" : text;
+
+static string? AdminToken(HttpContext http) => http.Request.Headers[AdminLock.Header].ToString() is { Length: > 0 } t ? t : null;
+
+static IResult TooManyTries(int seconds) => Results.Problem($"Too many wrong codes. Try again in {seconds} s.", statusCode: 429,
+    extensions: new Dictionary<string, object?> { ["retryAfter"] = seconds });
+
+// Settings whose saved value differs from what the server is running with.
+List<string> RestartNeeded() => SettingsFile.Editable
+    .Where(s => s.Restart && (settingsFile.Current(s.Key) ?? "") != (settingsFile.Running(s.Key) ?? ""))
+    .Select(s => s.Key).ToList();
+
+object SettingsView()
+{
+    var pending = RestartNeeded();
+    return new
+    {
+        file = settingsFile.Path,
+        dataDir = settings.DataDir,
+        canRestart = Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService(),
+        restartNeeded = pending,
+        lockMinutes = (int)adminLock.Idle.TotalMinutes,
+        photoTypes = PhotoSettings.AllTypes,
+        settings = SettingsFile.Editable.Select(s =>
+        {
+            var value = settingsFile.Current(s.Key);
+            var secret = s.Kind == "secret";
+            return new
+            {
+                key = s.Key, group = s.Group, label = s.Label, kind = s.Kind, restart = s.Restart, help = s.Help, @default = s.Default,
+                value = secret ? null : value ?? s.Default ?? "",
+                set = !string.IsNullOrEmpty(value),
+                pending = pending.Contains(s.Key),
+            };
+        }),
+    };
+}
+
+object RulesView()
+{
+    var path = settings.Photos.RulesPath;
+    try
+    {
+        var rules = photos.Rules();
+        return new
+        {
+            path, exists = File.Exists(path), error = (string?)null, photosEnabled = settings.Photos.Enabled, root = settings.Photos.Root,
+            @default = rules.Default, loadFolder = rules.LoadFolder,
+            rules = rules.Rules.Select(r => new { match = r.Match, folder = r.Folder }),
+        };
+    }
+    catch (PhotoRulesException ex)
+    {
+        return new
+        {
+            path, exists = File.Exists(path), error = (string?)ex.Message, photosEnabled = settings.Photos.Enabled, root = settings.Photos.Root,
+            @default = (string?)null, loadFolder = "{load}", rules = Array.Empty<object>().Select(_ => new { match = "", folder = "" }),
+        };
     }
 }
 
@@ -473,3 +846,9 @@ public partial class Program
 }
 
 public sealed record DeviceUpdate(string? Name, string? Color);
+public sealed record PinRequest(string? Pin);
+public sealed record PinChange(string? Current, string? Pin);
+public sealed record UrlRequest(string? Url);
+public sealed record RuleRequest(string? Match, string? Folder);
+public sealed record RulesRequest(string? Default, string? LoadFolder, List<RuleRequest>? Rules);
+public sealed record RulesTest(string? Default, string? LoadFolder, List<RuleRequest>? Rules, string? Job, string? Load);

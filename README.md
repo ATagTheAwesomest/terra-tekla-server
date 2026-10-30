@@ -12,8 +12,10 @@ The shop's own server for the TERRA iPad app
 - **Passes PowerFab calls through** to
   [tekla-conversion-layer](https://github.com/ATagTheAwesomest/tekla-conversion-layer), which stays
   a plain PowerFab REST converter. Its key stays on this server.
-- **Admin page** at `/admin/`: every device (rename, recolour, what it did recently), jobs and loads
-  with their stacks and who scanned what, photos, server status and the docs.
+- **Admin page** at `/admin/`: every device (rename, recolour, what it did recently), the PowerFab
+  jobs it can reach, loads with their stacks and who scanned what, photos and the docs. Server stats
+  and health, and Settings (server settings, photo folder rules, backup, restart) sit behind an
+  admin code entered on an on-screen keypad.
 
 ```
 iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conversion-layer ──► PowerFab
@@ -65,6 +67,9 @@ repo in an elevated PowerShell:
 | `src/TerraTeklaServer/Store.cs` | SQLite database |
 | `src/TerraTeklaServer/Hub.cs` | Live connections |
 | `src/TerraTeklaServer/PhotoStore.cs` | Photo folders and rules |
+| `src/TerraTeklaServer/AdminLock.cs` | The admin code (hashed) and its sessions |
+| `src/TerraTeklaServer/SettingsFile.cs` | Reading, checking and saving `local.settings.json` from the admin page |
+| `src/TerraTeklaServer/ServerStats.cs` | Request, error and log figures for the Server view |
 | `src/TerraTeklaServer/wwwroot/admin/` | Admin page |
 | `tools/fake-powerfab.mjs` | Fake conversion layer for testing |
 | `windows/` | Service install, deploy and release scripts, example settings |

@@ -28,7 +28,7 @@ This file ships next to `TerraTeklaServer.exe` as `PHOTOS.md` and is shown on th
 ## Turning it on (startup options)
 
 In `local.settings.json` in the install folder (`C:\TerraTeklaServer\local.settings.json`), or as
-environment variables. Restart the service after changing them (`Restart-Service TerraTeklaServer`).
+environment variables, or on the admin page (Settings > Photos). Restart the service after changing them (`Restart-Service TerraTeklaServer`, or Restart server on the admin page).
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -57,7 +57,10 @@ a service: use the `\\server\share\...` path in rules instead.
 ## The rules file (which folder a job goes in)
 
 `photo-rules.json` maps job numbers to folders with regexes. It is re-read when it changes, so edits
-take effect without a restart. `photo-rules.example.json` next to the exe is a starting point:
+take effect without a restart. The admin page edits it too (Settings > Photo folders, behind the
+admin code): add, reorder and remove rules, try a job number to see its folder, and save. Saving from
+the page rewrites the file without comments (the old one is kept as `photo-rules.json.bak`). The
+admin page's Jobs list shows the folder each PowerFab job's photos go in. `photo-rules.example.json` next to the exe is a starting point:
 
 ```jsonc
 {

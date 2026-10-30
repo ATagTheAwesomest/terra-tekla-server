@@ -9,8 +9,10 @@ terra-tekla-server is the shop's own server for the TERRA iPad app (terra-tekla-
   (WebSocket);
 - **passes PowerFab calls through** to tekla-conversion-layer, adding the conversion layer's key so
   it never has to be on an iPad;
-- **has an admin page** at `/admin/`: devices (rename, colour), what each one did, jobs, loads with
-  their stacks, photos, server status and these docs.
+- **has an admin page** at `/admin/`: devices (rename, colour), what each one did, the PowerFab jobs
+  it can reach, loads with their stacks, photos and these docs, plus **Server** (stats and health)
+  and **Settings** (these settings, photo folders, admin code, backup, restart) behind an admin code
+  (see "Admin page" below).
 
 This file ships next to `TerraTeklaServer.exe` as `SETUP.md` and is shown on the admin page
 (Docs > Setup), so it always matches the running build. Photos have their own guide, `PHOTOS.md`.
@@ -47,9 +49,76 @@ variables with the same names. Restart the service after changing them
 | `DATA_DIR` | `data` | Folder for `terra.db`. Relative paths are next to the exe. Back this folder up. |
 | `CORS_ORIGINS` | empty | Other web addresses allowed to call the API from a browser, comma separated (e.g. `http://localhost:8080` while working on the app). Not needed when the app is served by this server. |
 | `PHOTOS_*` | | See `PHOTOS.md`. |
+| `ADMIN_LOCK_MINUTES` | `15` | The admin page's Server and Settings lock again after this many minutes without use. Takes effect without a restart. |
+| `ADMIN_PIN_HASH` | none | The admin code, as a salted PBKDF2 hash. Written by the admin page; never type a code here. Remove the line and restart to forget the code (the next visit asks for a new one). |
+
+Most of these can also be changed on the admin page (Settings), which writes this same file (the
+old one is kept as `local.settings.json.bak`) and refuses a value that would stop the server from
+starting. `DATA_DIR` is only changed here, by hand.
 
 Logging is in `appsettings.json` next to the exe (`Logging:LogLevel`). As a Windows service the logs
 go to the Windows Event Log (Application, source TerraTeklaServer).
+
+## Admin page
+
+`http://<server>:8095/admin/` (or the HTTPS address). It asks for the access key once per browser.
+
+- **Devices & activity**: every iPad, live, and what each did; rename and recolour them.
+- **Jobs**: every job PowerFab gives the server's PowerFab user (the list the iPads pick from), with
+  the loads and pieces this server has for each and the folder its photos go in. Filterable.
+- **Photos**: the latest photos from every iPad.
+- **Server** (locked): whether everything is working (PowerFab bridge, app served, access key,
+  photo rules, disk space), uptime, memory, connected iPads, scans and refusals per day for 14
+  days, requests and errors per minute for the last hour, PowerFab call times, each iPad's scans
+  this week, disk space, and the server's last warnings and errors. Updates every 10 seconds.
+- **Settings** (locked): the settings above, grouped, with a Test button for the conversion
+  layer's address; the **photo folder rules** (add, reorder, remove, try a job number, save: takes
+  effect at once); change the admin code; lock now; download a database backup; restart the server.
+- **Docs**: this guide and the photo guide.
+
+### The admin code
+
+Server and Settings need the admin code, 4 to 8 digits, entered on an on-screen keypad (the same
+9-key pad as the iPad app, so an iPad's keyboard never comes up; a desk keyboard's digits work too).
+
+- The first time Server or Settings is opened, the page asks to **set** a code (twice). After that it
+  can only be changed from Settings with the current code; changing it locks every other browser out.
+- The server keeps only a salted PBKDF2 hash (`ADMIN_PIN_HASH`), and checks the code itself on every
+  `/api/admin/*` route: hiding the page isn't what protects them.
+- Entering it gives that browser tab a token that lasts until `ADMIN_LOCK_MINUTES` pass without use,
+  the tab is closed, Lock is pressed, or the server restarts.
+- 5 wrong codes in a row block every try for 30 s, then 1 min, 2 min... up to 15 min.
+- Forgot it: on the server, remove the `ADMIN_PIN_HASH` line from `local.settings.json` and restart
+  the service.
+
+The code is on top of the access key, not instead of it: every `/api/admin` route needs both.
+
+### Restart from the admin page
+
+Most settings take effect after a restart; the page says which saved ones are waiting. **Restart
+server** ends the process with an error code so Windows starts it again by the service's recovery
+setting ("restart after a crash", which `install-service.ps1` sets). It only works when running as
+that service; the iPads reconnect by themselves a few seconds later.
+
+### Admin routes
+
+All need the access key and, except the first four, `X-Terra-Admin: <token>`.
+
+| Route | |
+|---|---|
+| `GET /api/admin/lock` | Whether a code is set, whether this token is unlocked, seconds until tries are taken again. |
+| `POST /api/admin/setup` `{"pin"}` | Sets the first code (409 once one is set). Answers `{"token"}`. |
+| `POST /api/admin/unlock` `{"pin"}` | Answers `{"token"}`; 403 wrong code, 429 blocked. |
+| `POST /api/admin/lock` | Ends this token. |
+| `PUT /api/admin/pin` `{"current","pin"}` | Changes the code. |
+| `GET/PUT /api/admin/settings` | The editable settings / save some (`{"KEY": "value"}`; a secret left out or null is kept). |
+| `POST /api/admin/test-conversion` `{"url"}` | Whether that address answers like the conversion layer. |
+| `GET/PUT /api/admin/photo-rules`, `POST /api/admin/photo-rules/test` | The photo folder rules; where a job's photos would go. |
+| `GET /api/admin/stats` | Everything the Server view shows. |
+| `GET /api/admin/backup` | A copy of `terra.db`. |
+| `POST /api/admin/restart` | See above. |
+
+`GET /api/jobs/powerfab` (access key only) is the Jobs list.
 
 ## Installing on Windows (first time)
 
