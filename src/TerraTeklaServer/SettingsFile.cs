@@ -39,8 +39,10 @@ public sealed class SettingsFile(string path, IConfiguration running)
             "Where the server listens, e.g. http://0.0.0.0:8095. A wrong value stops the server from starting.", "http://localhost:5000"),
         new("CORS_ORIGINS", "Network", "Other web addresses allowed", "list", true,
             "Comma separated. Only needed while working on the app from another address."),
-        new("ADMIN_LOCK_MINUTES", "Admin page", "Lock after (minutes idle)", "number", false,
-            "Server and Settings lock again after this many minutes without use.", "15"),
+        new("ADMIN_LOCK_MINUTES", "Admin", "Stay unlocked for (minutes)", "number", false,
+            "After the admin code is entered, that device (from that IP address) stays unlocked this long.", "30"),
+        new("SERVER_REPO", "Updates", "Server git clone", "path", false,
+            "The terra-tekla-server git clone deploy.ps1 runs from, e.g. C:\\src\\terra-tekla-server. Needed for Update server."),
     ];
 
     static readonly JsonDocumentOptions DocOptions = new() { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };

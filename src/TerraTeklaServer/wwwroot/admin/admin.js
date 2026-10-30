@@ -2,9 +2,11 @@
 // every job, load, stack, piece and photo the server keeps, with links between them. It reads the
 // same /api routes the iPads use and stays live over the same /ws connection.
 //
-// Server (stats and health) and Settings sit behind the admin code, entered on an on-screen keypad.
-// The server checks the code and every /api/admin route itself; this page only keeps the token
-// (sessionStorage, so it goes with the tab) and sends it as X-Terra-Admin.
+// The whole board sits behind the access key (the same one the iPads use) and the admin code,
+// entered on an on-screen keypad. The server checks the code and every /api/admin route itself;
+// this page keeps the token it gets in localStorage, shared with the iPad app (same server), and
+// sends it as X-Terra-Admin. The token is good for 30 minutes from the IP address it was got from.
+// It installs as an app (manifest.webmanifest, sw.js).
 
 const $ = (sel) => document.querySelector(sel);
 const KEY = 'terra.admin.key';
@@ -17,21 +19,41 @@ const photoUrls = new Map(); // "job/load/name" -> object URL
 
 // ---- Requests -------------------------------------------------------------------------
 
+// This page's own saved key, else the iPad app's when the app uses this same server.
 function key() {
-  try { return localStorage.getItem(KEY) ?? ''; } catch { return ''; }
+  try {
+    const own = localStorage.getItem(KEY);
+    if (own) return own;
+    const app = JSON.parse(localStorage.getItem('terra.api') ?? 'null');
+    return app && !app.url ? app.key ?? '' : '';
+  } catch { return ''; }
+}
+
+// { token, until } while unlocked. The iPad app writes the same entry.
+function unlockEntry() {
+  try {
+    const e = JSON.parse(localStorage.getItem(UNLOCK) ?? 'null');
+    return e?.token && new Date(e.until).getTime() > Date.now() ? e : null;
+  } catch { return null; }
 }
 
 function adminToken() {
-  try { return sessionStorage.getItem(UNLOCK) ?? ''; } catch { return ''; }
+  return unlockEntry()?.token ?? '';
 }
 
-function setAdminToken(token) {
+function setAdminToken(token, until) {
   try {
-    if (token) sessionStorage.setItem(UNLOCK, token);
-    else sessionStorage.removeItem(UNLOCK);
+    if (token) localStorage.setItem(UNLOCK, JSON.stringify({ token, until: until ?? unlockEntry()?.until }));
+    else localStorage.removeItem(UNLOCK);
   } catch { /* private window */ }
-  document.body.classList.toggle('unlocked', !!token);
-  $('#btn-lock').hidden = !token;
+  drawLockButton();
+}
+
+function drawLockButton() {
+  const e = unlockEntry();
+  document.body.classList.toggle('unlocked', !!e);
+  $('#btn-lock').hidden = !e;
+  if (e) $('#lock-left').textContent = `Lock · ${Math.max(1, Math.ceil((new Date(e.until).getTime() - Date.now()) / 60000))} min`;
 }
 
 class ApiError extends Error {
@@ -466,18 +488,18 @@ function openPinPad({ title = 'Admin code', note = '', error = '', okLabel = 'Un
 async function unlock() {
   let lock;
   try { lock = await api('/admin/lock'); } catch (err) { return false; }
-  if (lock.unlocked) { setAdminToken(adminToken()); return true; }
+  if (lock.unlocked) { drawLockButton(); return true; }
   if (!lock.pinSet) {
     let error = '';
     for (;;) {
-      const first = await openPinPad({ title: 'Set an admin code', note: 'No admin code is set yet. Pick 4 to 8 digits: it will be needed to see Server and Settings.', error, okLabel: 'Next' });
+      const first = await openPinPad({ title: 'Set an admin code', note: 'No admin code is set yet. Pick 4 to 8 digits: it will be needed to open the admin board and change server settings, here and on the iPads.', error, okLabel: 'Next' });
       if (first === null) return false;
       const again = await openPinPad({ title: 'Enter it again', note: 'The same code, to be sure.', okLabel: 'Set code' });
       if (again === null) return false;
       if (first !== again) { error = 'The two codes didn’t match. Start again.'; continue; }
       try {
         const r = await api('/admin/setup', { method: 'POST', body: { pin: first } });
-        setAdminToken(r.token);
+        setAdminToken(r.token, r.until);
         return true;
       } catch (err) {
         error = err.message;
@@ -487,11 +509,11 @@ async function unlock() {
   }
   let error = lock.retryAfter ? `Too many wrong codes. Try again in ${lock.retryAfter} s.` : '';
   for (;;) {
-    const pin = await openPinPad({ title: 'Admin code', note: 'Server and Settings are locked.', error });
+    const pin = await openPinPad({ title: 'Admin code', note: 'The admin board is locked. It stays open on this device for 30 minutes after the code.', error });
     if (pin === null) return false;
     try {
       const r = await api('/admin/unlock', { method: 'POST', body: { pin } });
-      setAdminToken(r.token);
+      setAdminToken(r.token, r.until);
       return true;
     } catch (err) {
       error = err.message;
@@ -499,11 +521,11 @@ async function unlock() {
   }
 }
 
-function lockedPage(what) {
+function lockedPage() {
   return `<section class="panel locked-panel">
     <div class="big" aria-hidden="true">🔒</div>
-    <h1>${esc(what)} is locked</h1>
-    <p class="muted">Enter the admin code to see it. It locks again by itself after a while without use.</p>
+    <h1>The admin board is locked</h1>
+    <p class="muted">Enter the admin code (the same one the iPads use). This device then stays unlocked for 30 minutes.</p>
     <p><button class="btn btn-lg primary" type="button" data-unlock>Enter code</button></p>
   </section>`;
 }
@@ -520,14 +542,14 @@ async function locked(what, page) {
   const ask = redrawReason === 'nav';
   if (!adminToken()) {
     if (ask) setTimeout(async () => { if (await unlock()) draw(); }, 0);
-    return lockedPage(what);
+    return lockedPage();
   }
   try {
     return await page();
   } catch (err) {
     if (err.status === 403 && err.problem?.locked) {
       if (ask) setTimeout(async () => { if (await unlock()) draw(); }, 0);
-      return lockedPage(what);
+      return lockedPage();
     }
     throw err;
   }
@@ -702,7 +724,7 @@ function rulesEditor(r) {
 }
 
 async function pageSettings() {
-  const [view, rules] = await Promise.all([api('/admin/settings'), api('/admin/photo-rules')]);
+  const [view, rules, updates] = await Promise.all([api('/admin/settings'), api('/admin/photo-rules'), api('/admin/update')]);
   if (!rulesDraft) rulesDraft = { default: rules.default ?? '', loadFolder: rules.loadFolder, rules: rules.rules.map((x) => ({ ...x })) };
   const groups = [...new Set(view.settings.map((s) => s.group))];
   return `
@@ -724,6 +746,7 @@ async function pageSettings() {
         <p class="muted">Locks Server and Settings on this page. It is kept on the server only as a hash. Forgot it? Remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> on the server and restart; the next visit asks for a new one.</p>
         <div class="form-foot"><button class="btn" type="button" data-change-pin>Change the code</button><button class="btn" type="button" data-lock-now>Lock now</button><span class="muted" id="pin-saved"></span></div>
       </section>
+      <section class="panel" id="updates">${updatesPanel(updates)}</section>
       <section class="panel">
         <h2>Maintenance</h2>
         <div class="form-foot" style="margin-top:0">
@@ -734,6 +757,53 @@ async function pageSettings() {
       </section>
     </div>
   </div>`;
+}
+
+function updatesPanel(u) {
+  const c = u.client;
+  const why = !u.supported ? 'Updates run only on the Windows server.' : '';
+  return `<h2>Updates</h2>
+    <p class="muted">The iPad app is served from <code>${esc(u.clientRoot || '(no iPad app folder set)')}</code>, now v${esc(u.clientVersion ?? '?')}.
+      <b>Update iPad app</b> runs <code>update-client.ps1</code>: it gets the latest terra-tekla-client from GitHub. No restart; the iPads get it when they press Update or next open the app.
+      <b>Update server</b> runs <code>deploy.ps1</code> from <code>${esc(u.serverRepo ?? 'SERVER_REPO (not set)')}</code>: it gets the latest server, builds it, restarts the service and updates the iPad app too. The iPads reconnect by themselves.</p>
+    ${why ? `<p class="warn-text">${esc(why)}</p>` : ''}
+    <div class="form-foot" style="margin-top:0">
+      <button class="btn primary" type="button" data-update="client" ${!u.supported || !u.clientScript || c?.running ? 'disabled' : ''}>${c?.running ? 'Updating iPad app…' : 'Update iPad app'}</button>
+      <button class="btn" type="button" data-update="server" ${!u.supported || !u.service || !u.serverScript ? 'disabled' : ''}>Update server</button>
+      <span class="muted" id="update-result"></span>
+    </div>
+    ${u.supported && !u.serverScript ? '<p class="muted">Update server needs <b>Server git clone</b> (Updates, in the settings on the left) set to the terra-tekla-server git clone.</p>' : ''}
+    ${c ? `<h3>iPad app update ${c.running ? '(running)' : c.exitCode === 0 ? `<span class="ok-text">done ${esc(when(c.finishedAt))}</span>` : `<span class="error">failed ${esc(when(c.finishedAt))}</span>`}</h3>
+      <pre class="test-out" style="white-space:pre-wrap;max-height:220px;overflow:auto">${esc(c.output.join('\n') || '…')}</pre>` : ''}
+    ${u.server ? `<h3>Last server update <span class="muted">${esc(when(u.server.changedAt))}</span></h3>
+      <pre class="test-out" style="white-space:pre-wrap;max-height:220px;overflow:auto">${esc(u.server.output.join('\n'))}</pre>` : ''}`;
+}
+
+let updatePoll = null;
+
+async function refreshUpdates() {
+  clearTimeout(updatePoll);
+  if (currentPage !== 'settings' || !$('#updates')) return;
+  try {
+    const u = await api('/admin/update');
+    $('#updates').innerHTML = updatesPanel(u);
+    if (u.client?.running) updatePoll = setTimeout(refreshUpdates, 1500);
+  } catch { /* locked or gone: the next draw shows it */ }
+}
+
+async function startUpdate(which) {
+  const out = $('#update-result');
+  if (which === 'server' && !confirm('Update the server now? It gets the latest code from GitHub, builds it and restarts. The iPads lose the connection for about a minute and reconnect by themselves.')) return;
+  try {
+    await api(`/admin/update/${which}`, { method: 'POST' });
+  } catch (err) {
+    out.textContent = err.message;
+    out.className = 'error';
+    return;
+  }
+  if (which === 'client') { refreshUpdates(); return; }
+  $('#main').innerHTML = '<section class="panel locked-panel"><h1>Updating the server…</h1><p class="muted" id="restart-wait">deploy.ps1 is pulling, building and restarting. This page reloads when the server is back; Settings › Updates then shows how it went.</p></section>';
+  await waitForServer(240000, true);
 }
 
 function readSettingsForm() {
@@ -777,20 +847,26 @@ async function restartServer() {
     return;
   }
   $('#main').innerHTML = '<section class="panel locked-panel"><h1>Restarting…</h1><p class="muted" id="restart-wait">Waiting for the server to come back.</p></section>';
+  await waitForServer(120000, false);
+}
+
+// Waits for the server to go away (when it should) and answer again, then reloads the page.
+async function waitForServer(limit, expectDown) {
   const started = Date.now();
+  const up = async () => {
+    try { return (await fetch('../health', { cache: 'no-store' })).ok; } catch { return false; }
+  };
   await new Promise((r) => setTimeout(r, 4000));
-  for (;;) {
-    try {
-      const res = await fetch('../health', { cache: 'no-store' });
-      if (res.ok) break;
-    } catch { /* still down */ }
-    if (Date.now() - started > 120000) {
-      $('#restart-wait').textContent = 'It hasn’t come back after 2 minutes. Check the TerraTeklaServer service on the server.';
+  if (expectDown) while (await up() && Date.now() - started < limit) await new Promise((r) => setTimeout(r, 2000));
+  while (!(await up())) {
+    if (Date.now() - started > limit) {
+      $('#restart-wait').textContent = `It hasn’t come back after ${Math.round(limit / 60000)} minutes. Check the TerraTeklaServer service on the server, and data\\deploy-last.log.`;
       return;
     }
     await new Promise((r) => setTimeout(r, 1500));
   }
   setAdminToken(''); // sessions don't survive a restart
+  location.hash = '#/settings';
   location.reload();
 }
 
@@ -806,7 +882,7 @@ async function changePin() {
     if (pin !== again) { error = 'The two codes didn’t match. Start again.'; continue; }
     try {
       const r = await api('/admin/pin', { method: 'PUT', body: { current, pin } });
-      setAdminToken(r.token);
+      setAdminToken(r.token, r.until);
       $('#pin-saved').textContent = 'Code changed. Other browsers have to enter the new one.';
     } catch (err) {
       $('#pin-saved').textContent = err.message;
@@ -879,22 +955,23 @@ async function draw() {
     a.dataset.nav === (page === '' || page === 'device' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
   currentPage = page;
   try {
-    const html = page === 'device' ? await pageDevice(arg)
-      : page === 'jobs' ? await pageJobs()
-      : page === 'server' ? await locked('Server', pageServer)
-      : page === 'settings' ? await locked('Settings', pageSettings)
-      : page === 'job' ? await pageJob(arg)
-      : page === 'load' ? await pageLoad(arg, query)
-      : page === 'mark' ? await pageMark(arg, query)
-      : page === 'photos' ? await pagePhotos()
-      : page === 'docs' ? await pageDocs(arg || 'setup')
-      : await pageHome();
+    const html = await locked('The admin board', () => page === 'device' ? pageDevice(arg)
+      : page === 'jobs' ? pageJobs()
+      : page === 'server' ? pageServer()
+      : page === 'settings' ? pageSettings()
+      : page === 'job' ? pageJob(arg)
+      : page === 'load' ? pageLoad(arg, query)
+      : page === 'mark' ? pageMark(arg, query)
+      : page === 'photos' ? pagePhotos()
+      : page === 'docs' ? pageDocs(arg || 'setup')
+      : pageHome());
     if (seq !== drawing) return;
     const scroll = window.scrollY;
     $('#main').innerHTML = html;
     window.scrollTo(0, scroll);
     fillPhotos();
     if (page === 'jobs') filterJobs();
+    if (page === 'settings') refreshUpdates();
     const focus = query.get('stack');
     if (focus && redrawReason === 'nav') document.getElementById(`stack-${focus}`)?.scrollIntoView({ block: 'start' });
   } catch (err) {
@@ -995,6 +1072,7 @@ function bind() {
     const t = e.target;
     if (t.closest('[data-unlock]')) { if (await unlock()) draw(); return; }
     if (t.closest('[data-restart]')) { restartServer(); return; }
+    if (t.closest('[data-update]')) { startUpdate(t.closest('[data-update]').dataset.update); return; }
     if (t.closest('[data-change-pin]')) { changePin(); return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }
     if (t.closest('[data-download]')) {
@@ -1114,6 +1192,13 @@ function bind() {
   $('#pin-cancel').addEventListener('click', () => closePin(null));
   $('#pin-ok').addEventListener('click', () => closePin(pad?.value ?? null));
 
+  // The lock button counts down; when the 30 minutes are up the board locks.
+  setInterval(() => {
+    const was = document.body.classList.contains('unlocked');
+    drawLockButton();
+    if (was && !unlockEntry()) { redrawReason = 'nav'; draw(); }
+  }, 20000);
+
   // The Server page keeps itself up to date.
   setInterval(() => {
     if (currentPage === 'server' && adminToken() && !document.hidden && !$('#dlg-pin').open) { redrawReason = 'live'; draw(); }
@@ -1122,7 +1207,8 @@ function bind() {
 }
 
 async function start() {
-  setAdminToken(adminToken());
+  drawLockButton();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   try {
     devices = await api('/devices');
   } catch {

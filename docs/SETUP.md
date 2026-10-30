@@ -9,10 +9,12 @@ terra-tekla-server is the shop's own server for the TERRA iPad app (terra-tekla-
   (WebSocket);
 - **passes PowerFab calls through** to tekla-conversion-layer, adding the conversion layer's key so
   it never has to be on an iPad;
-- **has an admin page** at `/admin/`: devices (rename, colour), what each one did, the PowerFab jobs
-  it can reach, loads with their stacks, photos and these docs, plus **Server** (stats and health)
-  and **Settings** (these settings, photo folders, admin code, backup, restart) behind an admin code
-  (see "Admin page" below).
+- **has an admin board** at `/admin/`, installable as an app on a laptop or iPad: devices (rename,
+  colour), what each one did, the PowerFab jobs it can reach, loads with their stacks, photos,
+  server stats and health, settings (these settings, photo folders, admin code, backup, restart,
+  updates) and these docs, all behind the access key and an admin code (see "Admin board" below);
+- **updates itself and the iPad app** when asked from the admin board or an iPad
+  (`deploy.ps1`, `update-client.ps1`).
 
 This file ships next to `TerraTeklaServer.exe` as `SETUP.md` and is shown on the admin page
 (Docs > Setup), so it always matches the running build. Photos have their own guide, `PHOTOS.md`.
@@ -49,49 +51,94 @@ variables with the same names. Restart the service after changing them
 | `DATA_DIR` | `data` | Folder for `terra.db`. Relative paths are next to the exe. Back this folder up. |
 | `CORS_ORIGINS` | empty | Other web addresses allowed to call the API from a browser, comma separated (e.g. `http://localhost:8080` while working on the app). Not needed when the app is served by this server. |
 | `PHOTOS_*` | | See `PHOTOS.md`. |
-| `ADMIN_LOCK_MINUTES` | `15` | The admin page's Server and Settings lock again after this many minutes without use. Takes effect without a restart. |
+| `ADMIN_LOCK_MINUTES` | `30` | After the admin code is entered, that device (from that IP address) stays unlocked this many minutes. Takes effect without a restart. |
+| `SERVER_REPO` | empty | The terra-tekla-server git clone (e.g. `C:\src\terra-tekla-server`). Needed for **Update the server** from the admin board or an iPad, which runs its `windows\deploy.ps1`. Takes effect without a restart. |
 | `ADMIN_PIN_HASH` | none | The admin code, as a salted PBKDF2 hash. Written by the admin page; never type a code here. Remove the line and restart to forget the code (the next visit asks for a new one). |
 
-Most of these can also be changed on the admin page (Settings), which writes this same file (the
+Most of these can also be changed on the admin board (Settings), which writes this same file (the
 old one is kept as `local.settings.json.bak`) and refuses a value that would stop the server from
 starting. `DATA_DIR` is only changed here, by hand.
 
 Logging is in `appsettings.json` next to the exe (`Logging:LogLevel`). As a Windows service the logs
 go to the Windows Event Log (Application, source TerraTeklaServer).
 
-## Admin page
+## Admin board
 
-`http://<server>:8095/admin/` (or the HTTPS address). It asks for the access key once per browser.
+`https://<server>/admin/` (or `http://<server>:8095/admin/`). In the iPad app it is
+**Server settings / Admin > Open admin board**.
+
+It needs the same **access key** the iPads use (asked once per browser; opened from the iPad app,
+the app's key is used) and the **admin code** for everything on it.
+
+**As an app**: it has its own manifest and service worker, so Chrome or Edge on a laptop offers
+"Install TERRA admin" (address bar icon, or menu > Save and share > Install), and Safari on an iPad
+can Share > Add to Home Screen. Like the iPad app, that needs the HTTPS address. The installed app
+still asks the server for everything: key and code included.
 
 - **Devices & activity**: every iPad, live, and what each did; rename and recolour them.
 - **Jobs**: every job PowerFab gives the server's PowerFab user (the list the iPads pick from), with
   the loads and pieces this server has for each and the folder its photos go in. Filterable.
 - **Photos**: the latest photos from every iPad.
-- **Server** (locked): whether everything is working (PowerFab bridge, app served, access key,
-  photo rules, disk space), uptime, memory, connected iPads, scans and refusals per day for 14
-  days, requests and errors per minute for the last hour, PowerFab call times, each iPad's scans
-  this week, disk space, and the server's last warnings and errors. Updates every 10 seconds.
-- **Settings** (locked): the settings above, grouped, with a Test button for the conversion
-  layer's address; the **photo folder rules** (add, reorder, remove, try a job number, save: takes
-  effect at once); change the admin code; lock now; download a database backup; restart the server.
+- **Server**: whether everything is working (PowerFab bridge, app served, access key, photo rules,
+  disk space), uptime, memory, connected iPads, scans and refusals per day for 14 days, requests and
+  errors per minute for the last hour, PowerFab call times, each iPad's scans this week, disk space,
+  and the server's last warnings and errors. Updates every 10 seconds.
+- **Settings**: the settings above, grouped, with a Test button for the conversion layer's address;
+  the **photo folder rules** (add, reorder, remove, try a job number, save: takes effect at once);
+  **Updates** (below); change the admin code; lock now; download a database backup; restart.
 - **Docs**: this guide and the photo guide.
 
 ### The admin code
 
-Server and Settings need the admin code, 4 to 8 digits, entered on an on-screen keypad (the same
-9-key pad as the iPad app, so an iPad's keyboard never comes up; a desk keyboard's digits work too).
+4 to 8 digits, entered on an on-screen keypad (the iPad app's 9-pin keypad, so an iPad's keyboard
+never comes up; a desk keyboard's digits work too). The same code opens the admin board and the
+admin part of the iPad app's **Server settings / Admin**.
 
-- The first time Server or Settings is opened, the page asks to **set** a code (twice). After that it
-  can only be changed from Settings with the current code; changing it locks every other browser out.
+- The first time it is needed (on the admin board or an iPad), it asks to **set** a code (twice).
+  After that it can only be changed with the current one (admin board > Settings); changing it
+  locks every other device out.
+- Entering it unlocks **that device, from that IP address, for 30 minutes** (`ADMIN_LOCK_MINUTES`),
+  then it locks again. The iPad app and the admin board share the unlock on the same iPad. Lock now
+  ends it early; a server restart ends every unlock.
 - The server keeps only a salted PBKDF2 hash (`ADMIN_PIN_HASH`), and checks the code itself on every
-  `/api/admin/*` route: hiding the page isn't what protects them.
-- Entering it gives that browser tab a token that lasts until `ADMIN_LOCK_MINUTES` pass without use,
-  the tab is closed, Lock is pressed, or the server restarts.
+  `/api/admin/*` route: hiding the page isn't what protects them. (The device, activity, job and
+  photo lists the board shows are the same routes the iPads use, so those need only the access key.)
+- Behind a Cloudflare Tunnel every request reaches the server from 127.0.0.1; the visitor's own
+  address is then taken from `CF-Connecting-IP` (or `X-Forwarded-For`), which the server only
+  believes from 127.0.0.1.
 - 5 wrong codes in a row block every try for 30 s, then 1 min, 2 min... up to 15 min.
 - Forgot it: on the server, remove the `ADMIN_PIN_HASH` line from `local.settings.json` and restart
   the service.
 
-The code is on top of the access key, not instead of it: every `/api/admin` route needs both.
+### Server settings on the iPads
+
+The iPad app has one entry for all of it, **Server settings / Admin** (side menu, and the home
+screen tile before the first setup). In it:
+
+- **This iPad**: its name and colour, sounds, sending photos. No code needed.
+- **Admin** (admin code): open the admin board, change the server connection (address, access key,
+  setup QR), update the app on the server, update the server.
+
+The server connection is open until it is first saved; after that it needs the code. If the server
+can't be reached at all (or refuses the saved key), the code can't be checked, so the connection
+opens without it to be fixed.
+
+### Updates (from the admin board or an iPad)
+
+- **Update the app on the server** runs `update-client.ps1` (next to the exe): it gets the newest
+  terra-tekla-client into `CLIENT_ROOT` (git pull; first time git clone; without git, a zip from
+  GitHub). No restart. The output shows on the screen; when the version changed every iPad is told,
+  and gets it with Update in its menu. The iPad app's Update dialog has **Get newest from GitHub
+  first**, which does this and then reloads that iPad.
+- **Update the server** runs `windows\deploy.ps1` from `SERVER_REPO`: pull, build, stop the service,
+  copy, start, then `update-client.ps1`. The server stops half way, so it runs on its own and writes
+  to `DATA_DIR\deploy-last.log`; Settings > Updates shows that log once the server is back. Needs
+  the .NET SDK on the server (as for a deploy by hand) and the service running.
+
+Both run as the service's Windows user (LocalSystem unless changed). git then needs to reach the
+repos without a sign-in: fine for public repos; for private ones, set the service to log on as a
+user whose git can pull (services.msc > TERRA Server > Log On), or keep updating by hand. git's
+"dubious ownership" check is turned off for these runs, since that user didn't make the clones.
 
 ### Restart from the admin page
 
@@ -102,13 +149,14 @@ that service; the iPads reconnect by themselves a few seconds later.
 
 ### Admin routes
 
-All need the access key and, except the first four, `X-Terra-Admin: <token>`.
+All need the access key and, except the first four, `X-Terra-Admin: <token>` from the same IP
+address that got it.
 
 | Route | |
 |---|---|
 | `GET /api/admin/lock` | Whether a code is set, whether this token is unlocked, seconds until tries are taken again. |
-| `POST /api/admin/setup` `{"pin"}` | Sets the first code (409 once one is set). Answers `{"token"}`. |
-| `POST /api/admin/unlock` `{"pin"}` | Answers `{"token"}`; 403 wrong code, 429 blocked. |
+| `POST /api/admin/setup` `{"pin"}` | Sets the first code (409 once one is set). Answers `{"token","until"}`. |
+| `POST /api/admin/unlock` `{"pin"}` | Answers `{"token","until"}`; 403 wrong code, 429 blocked. |
 | `POST /api/admin/lock` | Ends this token. |
 | `PUT /api/admin/pin` `{"current","pin"}` | Changes the code. |
 | `GET/PUT /api/admin/settings` | The editable settings / save some (`{"KEY": "value"}`; a secret left out or null is kept). |
@@ -117,6 +165,9 @@ All need the access key and, except the first four, `X-Terra-Admin: <token>`.
 | `GET /api/admin/stats` | Everything the Server view shows. |
 | `GET /api/admin/backup` | A copy of `terra.db`. |
 | `POST /api/admin/restart` | See above. |
+| `GET /api/admin/update` | Versions, whether updates can run here, the last app update's output, the last server update's log. |
+| `POST /api/admin/update/client` | Starts `update-client.ps1` (202; follow it with `GET /api/admin/update`). |
+| `POST /api/admin/update/server` | Starts `deploy.ps1` (202); the server restarts. |
 
 `GET /api/jobs/powerfab` (access key only) is the Jobs list.
 
@@ -176,16 +227,17 @@ are not copied). Open the server's own address instead and add that to the home 
 
 ## Updating
 
-From the repo, elevated PowerShell: `.\windows\deploy.ps1`. It:
+From the admin board or an iPad (**Updates**, above), or by hand from the repo, elevated
+PowerShell: `.\windows\deploy.ps1`. It:
 
-1. `git pull --ff-only` this repo, and the iPad app's clone at `CLIENT_ROOT` (skip with `-SkipClient`,
-   or both with `-SkipPull`);
+1. `git pull --ff-only` this repo, then runs `update-client.ps1` (beside it) for the iPad app in
+   `CLIENT_ROOT` (skip the app with `-SkipClient`, both pulls with `-SkipPull`);
 2. builds, stops the service, copies the build over `C:\TerraTeklaServer` (never touching
    `local.settings.json`, `photo-rules.json` or `data\`), starts it and checks `/health`.
 
-The iPad app alone can be updated with just `git -C C:\TerraTeklaClient pull`: no restart, the
-iPads get it the next time the app is opened (the app's version shows in its menu and on the admin
-page). `deploy.ps1 -InstallDir D:\Other -ServiceName Other` for a non-default install.
+The iPad app alone: `C:\TerraTeklaServer\update-client.ps1` (or the button). No restart; the iPads
+get it with Update in their menu or the next time the app is opened (the app's version shows in its
+menu and on the admin board). `deploy.ps1 -InstallDir D:\Other -ServiceName Other` for a non-default install.
 
 The database schema is created and upgraded by the server itself at startup.
 

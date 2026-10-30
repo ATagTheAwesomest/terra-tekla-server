@@ -30,6 +30,7 @@ builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(serverStats);
 builder.Services.AddSingleton(new SettingsFile(settingsPath, builder.Configuration));
 builder.Services.AddSingleton<AdminLock>();
+builder.Services.AddSingleton<Updater>();
 builder.Services.AddSingleton(settings.Photos);
 builder.Services.AddSingleton<PhotoStore>();
 builder.Services.AddSingleton<Store>();
@@ -46,6 +47,7 @@ var hub = app.Services.GetRequiredService<Hub>();
 var photos = app.Services.GetRequiredService<PhotoStore>();
 var settingsFile = app.Services.GetRequiredService<SettingsFile>();
 var adminLock = app.Services.GetRequiredService<AdminLock>();
+var updater = app.Services.GetRequiredService<Updater>();
 var version = typeof(Store).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
 if (settings.AccessKey == "")
@@ -56,6 +58,8 @@ if (settings.ClientRoot == "" || !File.Exists(Path.Combine(settings.ClientRoot, 
     app.Logger.LogWarning("CLIENT_ROOT ({Root}) has no index.html: the iPad app isn't being served.", settings.ClientRoot);
 
 hub.Changed += () => hub.Broadcast(new { type = "devices", devices = DeviceList() });
+// Tell every iPad a new app is on the server, so it can offer to reload.
+updater.ClientUpdated += v => hub.Broadcast(new { type = "client-updated", version = v });
 
 app.UseRequestStats(serverStats);
 app.UseCors();
@@ -67,6 +71,7 @@ app.UseDefaultFiles();
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = c => c.Context.Response.Headers.CacheControl = "no-cache",
+    ContentTypeProvider = ClientContentTypes(),
 });
 if (settings.ClientRoot != "" && Directory.Exists(settings.ClientRoot))
 {
@@ -257,24 +262,26 @@ api.MapGet("/docs/{name}", (string name) => Doc(name) is { } text
 
 // ---- Admin code, settings and server stats (docs/SETUP.md, "Admin page") --------------------
 // Everything under /api/admin needs the access key like the rest of /api, and all but the routes
-// that check the code itself also need X-Terra-Admin: a token from entering the admin code.
+// that check the code itself also need X-Terra-Admin: a token from entering the admin code, used
+// from the same IP address (the iPad app and the admin page share it).
 
 var adminOpen = api.MapGroup("/admin");
 adminOpen.MapGet("/lock", (HttpContext http) => new
 {
     pinSet = adminLock.PinSet,
-    unlocked = adminLock.Valid(AdminToken(http)),
-    lockMinutes = (int)adminLock.Idle.TotalMinutes,
+    unlocked = adminLock.Valid(AdminToken(http), AdminLock.ClientIp(http)),
+    until = adminLock.Until(AdminToken(http), AdminLock.ClientIp(http)),
+    lockMinutes = (int)adminLock.Duration.TotalMinutes,
     retryAfter = adminLock.RetryAfter,
 });
 // The first code, while none is set. After that it can only be changed with the current one.
-adminOpen.MapPost("/setup", (PinRequest body) =>
+adminOpen.MapPost("/setup", (PinRequest body, HttpContext http) =>
 {
     try
     {
-        var token = adminLock.Setup(body.Pin ?? "");
-        store.Log(AdminDevice, "admin", "Set the admin code");
-        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+        var (token, until) = adminLock.Setup(body.Pin ?? "", AdminLock.ClientIp(http));
+        store.Log(Me(http) ?? AdminDevice, "admin", "Set the admin code");
+        return Results.Json(new { token, until });
     }
     catch (BadPinException ex)
     {
@@ -285,14 +292,14 @@ adminOpen.MapPost("/setup", (PinRequest body) =>
         return Results.Problem(ex.Message, statusCode: 409);
     }
 });
-adminOpen.MapPost("/unlock", (PinRequest body) =>
+adminOpen.MapPost("/unlock", (PinRequest body, HttpContext http) =>
 {
     if (!adminLock.PinSet)
         return Results.Problem("No admin code is set yet.", statusCode: 409);
     if (adminLock.RetryAfter is > 0 and var wait)
         return TooManyTries(wait);
-    if (adminLock.Unlock(body.Pin ?? "") is { } token)
-        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+    if (adminLock.Unlock(body.Pin ?? "", AdminLock.ClientIp(http)) is { } session)
+        return Results.Json(new { token = session.Token, until = session.Until });
     return adminLock.RetryAfter is > 0 and var blocked ? TooManyTries(blocked) : Results.Problem("That code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
 });
 adminOpen.MapPost("/lock", (HttpContext http) =>
@@ -302,21 +309,21 @@ adminOpen.MapPost("/lock", (HttpContext http) =>
 });
 
 var admin = api.MapGroup("/admin").AddEndpointFilter(async (context, next) =>
-    adminLock.Valid(AdminToken(context.HttpContext))
+    adminLock.Valid(AdminToken(context.HttpContext), AdminLock.ClientIp(context.HttpContext))
         ? await next(context)
         : Results.Problem(adminLock.PinSet ? "Locked: enter the admin code." : "Set an admin code first.", statusCode: 403,
             extensions: new Dictionary<string, object?> { ["locked"] = true, ["pinSet"] = adminLock.PinSet }));
 
-admin.MapPut("/pin", (PinChange body) =>
+admin.MapPut("/pin", (PinChange body, HttpContext http) =>
 {
     if (adminLock.RetryAfter is > 0 and var wait)
         return TooManyTries(wait);
     try
     {
-        if (adminLock.Change(body.Current ?? "", body.Pin ?? "") is not { } token)
+        if (adminLock.Change(body.Current ?? "", body.Pin ?? "", AdminLock.ClientIp(http)) is not { } session)
             return Results.Problem("The current code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
-        store.Log(AdminDevice, "admin", "Changed the admin code");
-        return Results.Json(new { token, lockMinutes = (int)adminLock.Idle.TotalMinutes });
+        store.Log(Me(http) ?? AdminDevice, "admin", "Changed the admin code");
+        return Results.Json(new { token = session.Token, until = session.Until });
     }
     catch (BadPinException ex)
     {
@@ -432,6 +439,37 @@ admin.MapGet("/stats", async (IHttpClientFactory factory) =>
     }, Json.Options);
 });
 
+// Updates: the iPad app (update-client.ps1) and the server itself (deploy.ps1). See Updater.cs.
+admin.MapGet("/update", () => Results.Json(updater.Status(ClientVersion), Json.Options));
+admin.MapPost("/update/client", (HttpContext http) =>
+{
+    try
+    {
+        updater.UpdateClient(ClientVersion);
+        var item = store.Log(Me(http) ?? AdminDevice, "admin", "Started an iPad app update on the server");
+        hub.Broadcast(new { type = "activity", items = new[] { item } });
+        return Results.Json(updater.Status(ClientVersion), Json.Options, statusCode: 202);
+    }
+    catch (UpdateException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 409);
+    }
+});
+admin.MapPost("/update/server", (HttpContext http) =>
+{
+    try
+    {
+        updater.UpdateServer();
+        var item = store.Log(Me(http) ?? AdminDevice, "admin", "Started a server update (deploy.ps1)");
+        hub.Broadcast(new { type = "activity", items = new[] { item } });
+        return Results.Json(new { started = true }, statusCode: 202);
+    }
+    catch (UpdateException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 409);
+    }
+});
+
 // A copy of the database to keep somewhere else.
 admin.MapGet("/backup", () =>
 {
@@ -444,11 +482,11 @@ admin.MapGet("/backup", () =>
 
 // Restarts the service so changed settings take effect. The process exits with an error code and
 // Windows starts it again (the service's "restart after a crash", set by install-service.ps1).
-admin.MapPost("/restart", () =>
+admin.MapPost("/restart", (HttpContext http) =>
 {
     if (!Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
         return Results.Problem("This server isn't running as the Windows service, so nothing would start it again. Restart it by hand.", statusCode: 409);
-    var item = store.Log(AdminDevice, "admin", "Restarted the server");
+    var item = store.Log(Me(http) ?? AdminDevice, "admin", "Restarted the server");
     hub.Broadcast(new { type = "activity", items = new[] { item } });
     app.Logger.LogWarning("Restarting: asked for on the admin page.");
     _ = Task.Run(async () =>
@@ -735,7 +773,7 @@ object SettingsView()
         dataDir = settings.DataDir,
         canRestart = Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService(),
         restartNeeded = pending,
-        lockMinutes = (int)adminLock.Idle.TotalMinutes,
+        lockMinutes = (int)adminLock.Duration.TotalMinutes,
         photoTypes = PhotoSettings.AllTypes,
         settings = SettingsFile.Editable.Select(s =>
         {

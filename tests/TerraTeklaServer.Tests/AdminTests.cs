@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
 
 namespace TerraTeklaServer.Tests;
 
@@ -205,6 +206,43 @@ public sealed class AdminTests : IDisposable
 
         // Not the Windows service here, so a restart is refused rather than just exiting.
         Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync("/api/admin/restart", null)).StatusCode);
+    }
+
+    [Fact]
+    public void An_unlock_only_works_from_the_address_that_entered_the_code_and_runs_out()
+    {
+        var file = new SettingsFile(settingsPath, new ConfigurationBuilder().Build());
+        var adminLock = new AdminLock(file, Microsoft.Extensions.Logging.Abstractions.NullLogger<AdminLock>.Instance);
+        var (token, until) = adminLock.Setup("2468", "10.0.0.5");
+        Assert.True(adminLock.Valid(token, "10.0.0.5"));
+        Assert.False(adminLock.Valid(token, "10.0.0.6"));
+        Assert.InRange(until - DateTime.UtcNow, TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(30)); // 30 min by default
+
+        file.Write(new Dictionary<string, string?> { ["ADMIN_LOCK_MINUTES"] = "1" });
+        var other = adminLock.Unlock("2468", "10.0.0.6")!.Value;
+        Assert.InRange(other.Until - DateTime.UtcNow, TimeSpan.FromSeconds(50), TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public async Task Updates_are_behind_the_code_and_only_run_on_windows()
+    {
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsync("/api/admin/update/client", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsync("/api/admin/update/server", null)).StatusCode);
+        var admin = Client(await Setup());
+        var status = await admin.GetFromJsonAsync<JsonObject>("/api/admin/update");
+        Assert.Equal(OperatingSystem.IsWindows(), (bool)status!["supported"]!);
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync("/api/admin/update/client", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await admin.PostAsync("/api/admin/update/server", null)).StatusCode); // not the service here
+    }
+
+    [Fact]
+    public async Task The_admin_page_installs_as_an_app()
+    {
+        var manifest = await factory.CreateClient().GetAsync("/admin/manifest.webmanifest");
+        Assert.Equal(HttpStatusCode.OK, manifest.StatusCode);
+        Assert.Equal("application/manifest+json", manifest.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(HttpStatusCode.OK, (await factory.CreateClient().GetAsync("/admin/sw.js")).StatusCode);
     }
 
     [Fact]

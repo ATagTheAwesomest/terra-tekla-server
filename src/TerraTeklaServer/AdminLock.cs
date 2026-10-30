@@ -9,9 +9,10 @@ public sealed class BadPinException(string message) : Exception(message);
 /// <summary>
 /// The admin code that locks the admin page's Server (stats) and Settings. The code is 4 to 8 digits,
 /// kept only as a salted PBKDF2 hash (<c>ADMIN_PIN_HASH</c> in local.settings.json). Entering it gives
-/// the browser a random token (header <c>X-Terra-Admin</c>) that stays good while it is used, until
-/// <c>ADMIN_LOCK_MINUTES</c> pass without a request. Wrong codes lock everyone out for a while, longer
-/// each time, so the code can't be guessed by trying them all.
+/// the device a random token (header <c>X-Terra-Admin</c>) that is good for <c>ADMIN_LOCK_MINUTES</c>
+/// (30 by default) from the IP address that entered the code, and no other. The iPad app and the
+/// admin page share it, since they come from the same server. Wrong codes lock everyone out for a
+/// while, longer each time, so the code can't be guessed by trying them all.
 /// </summary>
 public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
 {
@@ -20,7 +21,7 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
     const int FreeTries = 5;
 
     readonly object gate = new();
-    readonly Dictionary<string, DateTime> sessions = new(); // token hash -> last used (UTC)
+    readonly Dictionary<string, (string Ip, DateTime Until)> sessions = new(); // token hash -> where from, good until (UTC)
     string? hash = (file.Read().TryGetValue("ADMIN_PIN_HASH", out var h) ? h : null) is { Length: > 0 } stored ? stored : null;
     int failures;
     DateTime blockedUntil = DateTime.MinValue;
@@ -30,7 +31,8 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
         get { lock (gate) return hash is not null; }
     }
 
-    public TimeSpan Idle => TimeSpan.FromMinutes(Math.Clamp(int.TryParse(file.Current("ADMIN_LOCK_MINUTES"), out var m) ? m : 15, 1, 24 * 60));
+    /// <summary>How long entering the code unlocks a device for.</summary>
+    public TimeSpan Duration => TimeSpan.FromMinutes(Math.Clamp(int.TryParse(file.Current("ADMIN_LOCK_MINUTES"), out var m) ? m : 30, 1, 24 * 60));
 
     /// <summary>Seconds until codes are taken again after too many wrong ones, else 0.</summary>
     public int RetryAfter
@@ -39,7 +41,7 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
     }
 
     /// <summary>Sets the first code. Only works while none is set. Returns a session token.</summary>
-    public string Setup(string pin)
+    public (string Token, DateTime Until) Setup(string pin, string ip)
     {
         Check(pin);
         lock (gate)
@@ -47,13 +49,13 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
             if (hash is not null)
                 throw new InvalidOperationException("An admin code is already set. Change it from Settings, with the current code.");
             Save(Hash(pin));
-            log.LogWarning("The admin code was set for the first time.");
-            return NewSession();
+            log.LogWarning("The admin code was set for the first time (from {Ip}).", ip);
+            return NewSession(ip);
         }
     }
 
     /// <summary>Checks a code. Returns a session token, or null when it is wrong or tries are blocked.</summary>
-    public string? Unlock(string pin)
+    public (string Token, DateTime Until)? Unlock(string pin, string ip)
     {
         lock (gate)
         {
@@ -62,7 +64,7 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
             if (Verify(pin, hash))
             {
                 failures = 0;
-                return NewSession();
+                return NewSession(ip);
             }
             failures++;
             if (failures >= FreeTries)
@@ -70,44 +72,43 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
                 // 30 s, 60 s, 2 min... up to 15 min.
                 var wait = TimeSpan.FromSeconds(Math.Min(30 * Math.Pow(2, failures - FreeTries), 900));
                 blockedUntil = DateTime.UtcNow + wait;
-                log.LogWarning("{Count} wrong admin codes in a row: codes are refused for {Seconds} s.", failures, (int)wait.TotalSeconds);
+                log.LogWarning("{Count} wrong admin codes in a row (last from {Ip}): codes are refused for {Seconds} s.", failures, ip, (int)wait.TotalSeconds);
             }
             return null;
         }
     }
 
     /// <summary>Changes the code (the current one is needed). Every other session is locked out.</summary>
-    public string? Change(string current, string pin)
+    public (string Token, DateTime Until)? Change(string current, string pin, string ip)
     {
         Check(pin);
         lock (gate)
         {
-            if (Unlock(current) is null)
+            if (Unlock(current, ip) is null)
                 return null;
             Save(Hash(pin));
             sessions.Clear();
-            log.LogWarning("The admin code was changed.");
-            return NewSession();
+            log.LogWarning("The admin code was changed (from {Ip}).", ip);
+            return NewSession(ip);
         }
     }
 
-    /// <summary>Whether a token is a live session; using it keeps it alive.</summary>
-    public bool Valid(string? token)
+    /// <summary>When a token stops working, if it is a live session from this IP address; else null.</summary>
+    public DateTime? Until(string? token, string ip)
     {
         if (string.IsNullOrEmpty(token))
-            return false;
+            return null;
         var key = TokenKey(token);
         lock (gate)
         {
             var now = DateTime.UtcNow;
-            foreach (var old in sessions.Where(s => now - s.Value > Idle).Select(s => s.Key).ToList())
+            foreach (var old in sessions.Where(s => s.Value.Until <= now).Select(s => s.Key).ToList())
                 sessions.Remove(old);
-            if (!sessions.ContainsKey(key))
-                return false;
-            sessions[key] = now;
-            return true;
+            return sessions.TryGetValue(key, out var s) && s.Ip == ip ? s.Until : null;
         }
     }
+
+    public bool Valid(string? token, string ip) => Until(token, ip) is not null;
 
     public void Lock(string? token)
     {
@@ -155,11 +156,32 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
         hash = newHash;
     }
 
-    string NewSession()
+    (string, DateTime) NewSession(string ip)
     {
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-        sessions[TokenKey(token)] = DateTime.UtcNow;
-        return token;
+        var until = DateTime.UtcNow + Duration;
+        sessions[TokenKey(token)] = (ip, until);
+        return (token, until);
+    }
+
+    /// <summary>
+    /// The address a request came from. Behind a Cloudflare Tunnel (or another proxy on this computer)
+    /// every request arrives from 127.0.0.1, so then the address the proxy names is used. Those
+    /// headers are only believed from this computer itself.
+    /// </summary>
+    public static string ClientIp(HttpContext http)
+    {
+        var remote = http.Connection.RemoteIpAddress;
+        if (remote is not null && System.Net.IPAddress.IsLoopback(remote))
+        {
+            var cf = http.Request.Headers["CF-Connecting-IP"].ToString().Trim();
+            if (cf != "")
+                return cf;
+            var forwarded = http.Request.Headers["X-Forwarded-For"].ToString().Split(',')[0].Trim();
+            if (forwarded != "")
+                return forwarded;
+        }
+        return remote?.MapToIPv4().ToString() ?? "unknown";
     }
 
     // Only a hash of each token is kept, so a memory dump doesn't hand out sessions.
