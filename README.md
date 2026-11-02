@@ -14,9 +14,11 @@ The shop's own server for the TERRA iPad app
   a plain PowerFab REST converter. Its key stays on this server.
 - **Admin board** at `/admin/`, installable as an app: every device (rename, recolour, what it did
   recently), the PowerFab jobs it can reach, loads with their stacks and who scanned what, photos,
-  server stats and health, settings (server settings, photo folder rules, backup, restart, updates)
+  server stats and health, settings (server settings, photo folder rules, printers, backup, restart, updates)
   and the docs. Needs the iPads' access key and an admin code entered on an on-screen keypad, which
   unlocks that device for 30 minutes.
+- **Prints for the iPads** on the shop's printers, wherever the iPad is: the admin board scans the
+  network (Windows printers, Bonjour, a port probe) and picks which printers the iPads may use.
 - **Updates from the admin board or an iPad**: `windows/update-client.ps1` gets the newest iPad app
   into `CLIENT_ROOT`; `windows/deploy.ps1` updates the server and then runs it.
 
@@ -35,11 +37,13 @@ iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conve
   works, every endpoint and live message, the operations, the database schema, testing without
   PowerFab, and a setup checklist.
 - [docs/PHOTOS.md](docs/PHOTOS.md): photo settings, folder rules, naming, the photo API.
+- [docs/PRINTING.md](docs/PRINTING.md): printing through the server: finding and choosing printers,
+  Windows / IPP / raw printers, the service account, the print API, what was and wasn't tested.
 - [docs/MIGRATION.md](docs/MIGRATION.md): moving from the old setup (conversion layer on the internet,
   app on GitHub Pages) to this server: `windows\migrate-from-conversion-layer.ps1`, the Cloudflare
   hostname, paths and settings, Cloudflare Access, the iPads and the admin board, what data carries over.
 
-Both ship next to the exe and show on the admin page (Docs).
+These ship next to the exe and show on the admin page (Docs).
 
 ## Quick start (development)
 
@@ -73,6 +77,7 @@ repo in an elevated PowerShell:
 | `src/TerraTeklaServer/Store.cs` | SQLite database |
 | `src/TerraTeklaServer/Hub.cs` | Live connections |
 | `src/TerraTeklaServer/PhotoStore.cs` | Photo folders and rules |
+| `src/TerraTeklaServer/Printing/` | Printing: ticket layout, PDF, IPP, raw and Windows printers, printer scan, the printers list |
 | `src/TerraTeklaServer/AdminLock.cs` | The admin code (hashed) and its sessions |
 | `src/TerraTeklaServer/SettingsFile.cs` | Reading, checking and saving `local.settings.json` from the admin page |
 | `src/TerraTeklaServer/ServerStats.cs` | Request, error and log figures for the Server view |

@@ -4,15 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
   </PropertyGroup>
 
   <!-- The setup guide and photo guide: served by the admin page (/admin, Docs) and copied next to the exe. -->
   <ItemGroup>
     <EmbeddedResource Include="..\..\docs\SETUP.md" LogicalName="docs.SETUP.md" />
     <EmbeddedResource Include="..\..\docs\PHOTOS.md" LogicalName="docs.PHOTOS.md" />
+    <EmbeddedResource Include="..\..\docs\PRINTING.md" LogicalName="docs.PRINTING.md" />
     <None Include="..\..\docs\SETUP.md" Link="SETUP.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\PHOTOS.md" Link="PHOTOS.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\docs\PRINTING.md" Link="PRINTING.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\photo-rules.example.json" Link="photo-rules.example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\update-client.ps1" Link="update-client.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\local.settings.example.json" Link="local.settings.example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
@@ -26,6 +28,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.13" />
+    <!-- Windows printers (installed on the server): drawn through their drivers. Used on Windows only. -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.13" />
   </ItemGroup>
 
 </Project>

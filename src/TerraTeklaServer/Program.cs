@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.FileProviders;
 using TerraTeklaServer;
+using TerraTeklaServer.Printing;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -39,6 +40,16 @@ builder.Services.AddSingleton<PhotoBrowser>();
 builder.Services.AddSingleton<Store>();
 builder.Services.AddSingleton<Hub>();
 builder.Services.AddHttpClient("conversion", c => c.Timeout = TimeSpan.FromSeconds(90));
+builder.Services.AddSingleton<PrinterStore>();
+builder.Services.AddSingleton<PrintService>();
+builder.Services.AddSingleton<PrinterDiscovery>();
+// Network printers: their https (ipps) certificates are almost always self-made, so they aren't checked.
+builder.Services.AddHttpClient(PrintService.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(60))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        ConnectTimeout = TimeSpan.FromSeconds(5),
+        SslOptions = { RemoteCertificateValidationCallback = (_, _, _, _) => true },
+    });
 var uploadLimit = settings.Photos.MaxBytes * settings.Photos.MaxFiles + 1024 * 1024;
 builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = uploadLimit);
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
@@ -52,6 +63,9 @@ var browser = app.Services.GetRequiredService<PhotoBrowser>();
 var settingsFile = app.Services.GetRequiredService<SettingsFile>();
 var adminLock = app.Services.GetRequiredService<AdminLock>();
 var updater = app.Services.GetRequiredService<Updater>();
+var printerStore = app.Services.GetRequiredService<PrinterStore>();
+var printing = app.Services.GetRequiredService<PrintService>();
+var discovery = app.Services.GetRequiredService<PrinterDiscovery>();
 var version = typeof(Store).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
 if (settings.AccessKey == "")
@@ -590,6 +604,141 @@ admin.MapPost("/restart", (HttpContext http) =>
     return Results.Json(new { restarting = true }, statusCode: 202);
 });
 
+// ---- Printing (docs/PRINTING.md) ----------------------------------------------------------------
+// The iPads print through this server, which can reach the shop's printers from any building. The
+// admin board's Settings › Printers finds printers and picks which ones the iPads may use.
+
+// The printers the iPads may use.
+api.MapGet("/printers", () => Results.Json(new
+{
+    printers = printerStore.Allowed().Select(p => new { p.Id, p.Name, p.Location, p.Kind, p.Paper }),
+}));
+
+// Prints a ticket. Body: {"printerId": "...", "copies": 1, "ticket": {...}} (the ticket as the app lays it out).
+api.MapPost("/print", async (PrintRequest body, HttpContext http, CancellationToken ct) =>
+{
+    var me = Me(http);
+    if (printerStore.Find(body.PrinterId ?? "") is not { Allowed: true } printer)
+        return Results.Problem("That printer isn't offered to the iPads any more. Pick another one.", statusCode: 404);
+    Ticket ticket;
+    try
+    {
+        ticket = Ticket.Parse(body.Ticket);
+    }
+    catch (BadTicketException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+    try
+    {
+        var job = await printing.PrintAsync(printer, ticket, body.Copies ?? 1, me?.Name ?? "iPad", ct);
+        var item = store.Log(me ?? AdminDevice, "print",
+            $"Printed the {ticket.Title.ToLowerInvariant()} on {printer.Name}{(job.Copies > 1 ? $" ({job.Copies} copies)" : "")}", ticket.Job, null, ticket.Load);
+        hub.Broadcast(new { type = "activity", items = new[] { item } });
+        return Results.Json(new { ok = true, printer = printer.Name, pages = job.Pages, copies = job.Copies, jobId = job.PrinterJobId });
+    }
+    catch (PrinterException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 502);
+    }
+});
+
+// The ticket as a PDF, laid out as the server prints it (a preview, or to save).
+api.MapPost("/print/pdf", (PdfRequest body) =>
+{
+    try
+    {
+        var ticket = Ticket.Parse(body.Ticket);
+        var (pdf, _) = PrintService.Pdf(ticket, body.Paper);
+        var name = System.Text.RegularExpressions.Regex.Replace(PrintService.JobName(ticket), "[^A-Za-z0-9._-]+", "_");
+        return Results.File(pdf, "application/pdf", $"{name}.pdf");
+    }
+    catch (BadTicketException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// The admin board: every printer set up (allowed or not), and the last print jobs.
+admin.MapGet("/printers", () => Results.Json(new
+{
+    printers = printerStore.All(),
+    file = printerStore.Path,
+    windows = OperatingSystem.IsWindows(),
+    papers = Paper.Names,
+    recent = printing.Recent(),
+}));
+
+// Saves the whole printers list (add, rename, allow or not, remove).
+admin.MapPut("/printers", (PrintersRequest body, HttpContext http) =>
+{
+    try
+    {
+        var saved = printerStore.Save(body.Printers ?? []);
+        var item = store.Log(Me(http) ?? AdminDevice, "admin", $"Saved the printers: {saved.Count(p => p.Allowed)} of {saved.Count} offered to the iPads");
+        hub.Broadcast(new { type = "activity", items = new[] { item } });
+        hub.Broadcast(new { type = "printers" });
+        return Results.Json(new { printers = saved });
+    }
+    catch (BadPrinterException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// Looks for printers: Windows', Bonjour (mDNS) and a port probe of the server's networks. Takes a few seconds.
+admin.MapPost("/printers/scan", async (CancellationToken ct) =>
+{
+    var result = await discovery.ScanAsync(ct);
+    var mine = printerStore.All();
+    return Results.Json(new
+    {
+        networks = result.Networks,
+        notes = result.Notes,
+        ms = result.Ms,
+        windows = OperatingSystem.IsWindows(),
+        printers = result.Printers.Select(f => new
+        {
+            f.Kind, f.Address, f.Name, f.Model, f.Location, f.Ip, f.Sources, f.TakesPdf, f.State, f.Note,
+            addedId = mine.FirstOrDefault(p => p.Kind == f.Kind && p.Address.Equals(f.Address, StringComparison.OrdinalIgnoreCase))?.Id,
+        }),
+    });
+});
+
+// Asks one printer what it is and whether it is ready. Body: {"kind": "ipp", "address": "..."}.
+admin.MapPost("/printers/check", async (PrinterAddress body, CancellationToken ct) =>
+{
+    try
+    {
+        var kind = (body.Kind ?? "").Trim().ToLowerInvariant();
+        var address = PrinterStore.CleanAddress(kind, body.Address);
+        var check = await printing.CheckAsync(kind, address, ct);
+        return Results.Json(new { kind, address, check.Ok, check.Error, check.Name, check.Model, check.Location, check.State, check.TakesPdf, check.Formats });
+    }
+    catch (BadPrinterException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// Prints a one-page test ticket on a printer that is set up (allowed or not).
+admin.MapPost("/printers/{id}/test", async (string id, HttpContext http, CancellationToken ct) =>
+{
+    if (printerStore.Find(id) is not { } printer)
+        return Results.Problem("No printer with that id. Save the printers first.", statusCode: 404);
+    var me = Me(http) ?? AdminDevice;
+    try
+    {
+        var job = await printing.PrintAsync(printer, Ticket.TestPage(printer.Name, me.Name, DateTime.Now), 1, me.Name, ct);
+        store.Log(me, "admin", $"Printed a test page on {printer.Name}");
+        return Results.Json(new { ok = true, printer = printer.Name, pages = job.Pages, jobId = job.PrinterJobId });
+    }
+    catch (PrinterException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 502);
+    }
+});
+
 // ---- Photos (docs/PHOTOS.md) -----------------------------------------------------------------
 
 api.MapGet("/photos", () => new
@@ -950,6 +1099,7 @@ static string? Doc(string name)
     {
         "setup" => "docs.SETUP.md",
         "photos" => "docs.PHOTOS.md",
+        "printing" => "docs.PRINTING.md",
         _ => null,
     };
     if (resource is null)
@@ -1007,6 +1157,10 @@ public sealed record DeviceUpdate(string? Name, string? Color);
 public sealed record PinRequest(string? Pin);
 public sealed record PinChange(string? Current, string? Pin);
 public sealed record UrlRequest(string? Url);
+public sealed record PrintRequest(string? PrinterId, int? Copies, JsonNode? Ticket);
+public sealed record PdfRequest(JsonNode? Ticket, string? Paper);
+public sealed record PrintersRequest(List<PrinterEntry>? Printers);
+public sealed record PrinterAddress(string? Kind, string? Address);
 public sealed record RuleRequest(string? Match, string? Folder);
 public sealed record RulesRequest(string? Default, string? LoadFolder, List<RuleRequest>? Rules);
 public sealed record RulesTest(string? Default, string? LoadFolder, List<RuleRequest>? Rules, string? Job, string? Load);

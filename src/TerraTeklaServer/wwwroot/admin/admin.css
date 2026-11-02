@@ -257,3 +257,23 @@ tr.not-pf td:first-child b { color: var(--muted); }
 .btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, transparent); }
 p.path { word-break: break-all; }
 .photo .cap .btn { display: inline-flex; width: auto; aspect-ratio: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+
+/* Settings › Printers */
+.printer-list { display: grid; gap: .5rem; }
+.printer { display: grid; grid-template-columns: auto 1fr auto; gap: .75rem; align-items: start; background: var(--panel-2); padding: .6rem; border-radius: 8px; border-left: 4px solid transparent; }
+.printer.on { border-left-color: var(--accent); }
+.printer .row { display: flex; gap: .5rem; flex-wrap: wrap; }
+.printer .row input { flex: 1; min-width: 8rem; }
+.printer-allow { padding-top: .45rem; }
+.printer-sub { margin-top: .35rem; font-size: .85rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+.printer-sub code { word-break: break-all; }
+.printer-sub .paper { display: inline-flex; gap: .35rem; align-items: center; margin-left: .5rem; font-weight: 400; }
+.printer-note { margin-top: .35rem; font-size: .88rem; }
+.printer .tools { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
+.printer-scan { margin-top: .75rem; }
+.found { display: flex; justify-content: space-between; gap: .75rem; align-items: center; padding: .55rem 0; border-bottom: 1px solid #2a2a2a; }
+@media (max-width: 700px) {
+  .printer { grid-template-columns: 1fr; }
+  .printer .tools { justify-content: flex-start; }
+}
+select { font: inherit; color: var(--text); background: #0e0e0e; border: 1px solid #444; border-radius: 6px; padding: .45rem .6rem; min-height: 40px; }

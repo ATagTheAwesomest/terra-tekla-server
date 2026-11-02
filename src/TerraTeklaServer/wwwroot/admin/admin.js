@@ -778,8 +778,191 @@ function rulesEditor(r) {
   </section>`;
 }
 
+// ---- Printers (locked; part of Settings) -------------------------------------------------
+// The server prints for the iPads, so an iPad in another building can print on the shop's
+// printers. Scan finds printers; ticked ones are offered to the iPads. See Docs › Printing.
+
+let printersDraft = null; // the list being edited, kept across redraws
+let printersDirty = false;
+let printerScan = null; // the last scan's answer, or { running: true }
+const printerNotes = new Map(); // row key -> what Check / Test page said
+
+const KIND_LABEL = { windows: 'Windows printer', ipp: 'Network (IPP)', raw: 'Network (raw 9100)' };
+const printerKey = (p) => `${p.kind}|${String(p.address).toLowerCase()}`;
+
+function printerRow(p, i, info) {
+  const note = printerNotes.get(printerKey(p));
+  return `<div class="printer${p.allowed ? ' on' : ''}" data-printer="${i}">
+    <label class="switch printer-allow" title="Offer this printer to the iPads"><input type="checkbox" data-p-allowed ${p.allowed ? 'checked' : ''}> iPads</label>
+    <div class="printer-main">
+      <div class="row"><input type="text" data-p-name value="${esc(p.name ?? '')}" placeholder="Name the iPads see" aria-label="Name" spellcheck="false">
+        <input type="text" data-p-location value="${esc(p.location ?? '')}" placeholder="Where (optional)" aria-label="Location" style="max-width:12rem"></div>
+      <div class="printer-sub"><span class="pill">${esc(KIND_LABEL[p.kind] ?? p.kind)}</span> <code>${esc(p.address)}</code>${p.model ? ` · ${esc(p.model)}` : ''}
+        ${p.kind === 'windows' ? '<span class="muted"> · its own default paper</span>' : `<label class="paper">Paper <select data-p-paper>${info.papers.map((x) => `<option value="${x}" ${x === (p.paper || 'letter') ? 'selected' : ''}>${x === 'a4' ? 'A4' : x[0].toUpperCase() + x.slice(1)}</option>`).join('')}</select></label>`}</div>
+      ${note ? `<div class="printer-note ${note.ok ? 'ok-text' : 'error'}">${esc(note.text)}</div>` : ''}
+    </div>
+    <span class="tools">
+      <button class="btn" type="button" data-p-check>Check</button>
+      <button class="btn" type="button" data-p-test ${p.id && !printersDirty ? '' : 'disabled title="Save the printers first"'}>Test page</button>
+      <button class="btn" type="button" data-p-remove aria-label="Remove">✕</button>
+    </span>
+  </div>`;
+}
+
+function scanList() {
+  const r = printerScan;
+  if (!r) return '';
+  if (r.running) return '<p class="muted printer-scan">Scanning… Windows printers, Bonjour, and every address on the server’s network. This takes about 10 seconds.</p>';
+  if (r.error) return `<p class="error printer-scan">${esc(r.error)}</p>`;
+  const have = new Set(printersDraft.map(printerKey));
+  return `<div class="printer-scan">
+    <h3>Found ${r.printers.length} printer${r.printers.length === 1 ? '' : 's'} <span class="muted">in ${(r.ms / 1000).toFixed(1)} s · ${esc(r.networks.join(', ') || 'no network')}</span></h3>
+    ${r.notes.map((n) => `<p class="warn-text">${esc(n)}</p>`).join('')}
+    ${r.printers.length ? r.printers.map((f, i) => `<div class="found">
+      <div><b>${esc(f.name)}</b>${f.model && f.model !== f.name ? ` · ${esc(f.model)}` : ''}${f.location ? ` · <span class="muted">${esc(f.location)}</span>` : ''}
+        <div class="printer-sub"><span class="pill">${esc(KIND_LABEL[f.kind] ?? f.kind)}</span> <code>${esc(f.address)}</code>
+          ${f.takesPdf === true ? ' <span class="pill ok">takes PDF</span>' : f.takesPdf === false && f.kind !== 'windows' ? ' <span class="pill warn">no PDF</span>' : ''}
+          ${f.state ? ` <span class="muted">${esc(f.state)}</span>` : ''} <span class="muted">· found by ${esc(f.sources.join(' + '))}</span></div>
+        ${f.note ? `<div class="help">${esc(f.note)}</div>` : ''}</div>
+      ${have.has(printerKey(f)) ? '<span class="muted">Added</span>' : `<button class="btn" type="button" data-p-add-found="${i}">Add</button>`}
+    </div>`).join('') : '<p class="muted">No printers answered. Add one by its address below, or install it on the Windows server.</p>'}
+    ${!r.windows ? '<p class="muted">Windows printers are listed only when the server runs on Windows.</p>' : ''}
+  </div>`;
+}
+
+function printersPanel(info) {
+  if (!printersDraft) { printersDraft = info.printers.map((p) => ({ ...p })); printersDirty = false; }
+  const allowed = printersDraft.filter((p) => p.allowed).length;
+  return `<section class="panel" id="printers">
+    <h2>Printers</h2>
+    <p class="muted">The iPads print shipping tickets through this server, so they can print from any building on any printer the server reaches.
+      <b>Scan for printers</b> lists the printers installed on the Windows server and the network printers it can find. Tick <b>iPads</b> on the ones the iPads may use; ${allowed ? `${allowed} ${allowed === 1 ? 'is' : 'are'} ticked now` : 'none are ticked yet, so the iPads print with AirPrint only'}.
+      A Windows printer prints through its own driver and works with any printer; a network printer is sent a PDF, which it has to be able to print. Saved in <code>${esc(info.file)}</code>. See Docs › Printing.</p>
+    <div class="printer-list">${printersDraft.length ? printersDraft.map((p, i) => printerRow(p, i, info)).join('') : '<p class="muted">No printers yet.</p>'}</div>
+    <div class="form-foot"><button class="btn primary" type="button" data-printers-save>Save printers</button><button class="btn" type="button" data-printers-reset>Undo changes</button><span class="muted" id="printers-saved">${printersDirty ? 'Not saved yet.' : ''}</span></div>
+    <h3>Find printers</h3>
+    <div class="form-foot" style="margin-top:0"><button class="btn primary" type="button" data-printers-scan ${printerScan?.running ? 'disabled' : ''}>${printerScan?.running ? 'Scanning…' : 'Scan for printers'}</button></div>
+    <div id="printer-scan">${scanList()}</div>
+    <div class="field" style="margin-top:1rem"><label for="printer-add-address">Add by address</label>
+      <div class="row"><select id="printer-add-kind" aria-label="Kind">
+          <option value="ipp">Network (IPP)</option><option value="raw">Network (raw 9100)</option><option value="windows">Windows printer name</option></select>
+        <input type="text" id="printer-add-address" placeholder="e.g. 192.168.1.50, ipp://192.168.1.50/ipp/print, or the Windows printer’s name" spellcheck="false">
+        <button class="btn" type="button" data-p-add-manual>Add</button></div>
+      <div class="help">For a printer the scan can’t see, e.g. on another network the server reaches.</div></div>
+    ${info.recent.length ? `<h3>Recent print jobs</h3><ul class="feed">${info.recent.slice(0, 10).map((j) => `<li><time>${esc(ago(j.at))}</time>
+      <span class="what">${j.ok ? '<span class="ok-text">✓</span>' : '<span class="error">✕</span>'} ${esc(j.title)}${j.job ? ` · ${esc(j.job)}` : ''}${j.load ? ` load ${esc(j.load)}` : ''} on <b>${esc(j.printerName)}</b> for ${esc(j.by)}${j.ok ? ` · ${j.pages} page${j.pages === 1 ? '' : 's'}${j.copies > 1 ? ` × ${j.copies}` : ''}` : ` · ${esc(j.error)}`}</span></li>`).join('')}</ul>` : ''}
+  </section>`;
+}
+
+// Keeps what is typed in the printer rows, so a redraw doesn't lose it.
+function readPrinters() {
+  if (!printersDraft) return;
+  for (const row of document.querySelectorAll('[data-printer]')) {
+    const p = printersDraft[Number(row.dataset.printer)];
+    if (!p) continue;
+    p.allowed = row.querySelector('[data-p-allowed]').checked;
+    p.name = row.querySelector('[data-p-name]').value;
+    p.location = row.querySelector('[data-p-location]').value;
+    const paper = row.querySelector('[data-p-paper]');
+    if (paper) p.paper = paper.value;
+  }
+}
+
+let printersInfo = null;
+
+async function redrawPrinters() {
+  if (!$('#printers')) return;
+  readPrinters();
+  try { printersInfo = await api('/admin/printers'); } catch { /* keep the last */ }
+  if (printersInfo && $('#printers')) $('#printers').outerHTML = printersPanel(printersInfo);
+}
+
+function addPrinter(p) {
+  readPrinters();
+  if (printersDraft.some((x) => printerKey(x) === printerKey(p))) return;
+  printersDraft.push({ name: p.name, kind: p.kind, address: p.address, location: p.location ?? '', model: p.model ?? null, allowed: true, paper: 'letter' });
+  printersDirty = true;
+  redrawPrinters();
+}
+
+async function printerClick(t) {
+  if (t.closest('[data-printers-scan]')) {
+    readPrinters();
+    printerScan = { running: true };
+    redrawPrinters();
+    try { printerScan = await api('/admin/printers/scan', { method: 'POST' }); } catch (err) { printerScan = { error: err.message }; }
+    redrawPrinters();
+    return true;
+  }
+  const found = t.closest('[data-p-add-found]');
+  if (found) { addPrinter(printerScan.printers[Number(found.dataset.pAddFound)]); return true; }
+  if (t.closest('[data-p-add-manual]')) {
+    const kind = $('#printer-add-kind').value;
+    const address = $('#printer-add-address').value.trim();
+    if (!address) { $('#printer-add-address').focus(); return true; }
+    try {
+      // The server checks the address and says what is there (the printer is added either way).
+      const c = await api('/admin/printers/check', { method: 'POST', body: { kind, address } });
+      printerNotes.set(printerKey(c), { ok: c.ok && !c.error, text: c.ok ? `✓ ${[c.name, c.model, c.state].filter(Boolean).join(' · ') || 'answered'}${c.error ? ` · ${c.error}` : ''}` : `✕ ${c.error}` });
+      addPrinter({ kind: c.kind, address: c.address, name: c.name || address, model: c.model, location: c.location });
+    } catch (err) {
+      $('#printers-saved').textContent = err.message;
+      $('#printers-saved').className = 'error';
+    }
+    return true;
+  }
+  const row = t.closest('[data-printer]');
+  const i = row ? Number(row.dataset.printer) : -1;
+  if (row && t.closest('[data-p-remove]')) { readPrinters(); printersDraft.splice(i, 1); printersDirty = true; redrawPrinters(); return true; }
+  if (row && t.closest('[data-p-check]')) {
+    readPrinters();
+    const p = printersDraft[i];
+    printerNotes.set(printerKey(p), { ok: true, text: 'Asking the printer…' });
+    redrawPrinters();
+    try {
+      const c = await api('/admin/printers/check', { method: 'POST', body: { kind: p.kind, address: p.address } });
+      printerNotes.set(printerKey(p), { ok: c.ok && !c.error, text: c.ok ? `✓ ${[c.name, c.model, c.state, c.takesPdf === true ? 'takes PDF' : ''].filter(Boolean).join(' · ') || 'answered'}${c.error ? ` · ${c.error}` : ''}` : `✕ ${c.error}` });
+    } catch (err) {
+      printerNotes.set(printerKey(p), { ok: false, text: err.message });
+    }
+    redrawPrinters();
+    return true;
+  }
+  if (row && t.closest('[data-p-test]')) {
+    const p = printersDraft[i];
+    printerNotes.set(printerKey(p), { ok: true, text: 'Printing a test page…' });
+    redrawPrinters();
+    try {
+      const r = await api(`/admin/printers/${enc(p.id)}/test`, { method: 'POST' });
+      printerNotes.set(printerKey(p), { ok: true, text: `✓ Test page sent${r.jobId ? ` (printer job ${r.jobId})` : ''}. Check the printer.` });
+    } catch (err) {
+      printerNotes.set(printerKey(p), { ok: false, text: `✕ ${err.message}` });
+    }
+    redrawPrinters();
+    return true;
+  }
+  if (t.closest('[data-printers-reset]')) { printersDraft = null; printersDirty = false; redrawPrinters(); return true; }
+  if (t.closest('[data-printers-save]')) {
+    readPrinters();
+    try {
+      const r = await api('/admin/printers', { method: 'PUT', body: { printers: printersDraft } });
+      printersDraft = r.printers.map((p) => ({ ...p }));
+      printersDirty = false;
+      await redrawPrinters();
+      $('#printers-saved').textContent = 'Saved. The iPads see the ticked printers the next time they print.';
+    } catch (err) {
+      $('#printers-saved').textContent = err.message;
+      $('#printers-saved').className = 'error';
+    }
+    return true;
+  }
+  return false;
+}
+
 async function pageSettings() {
-  const [view, rules, updates] = await Promise.all([api('/admin/settings'), api('/admin/photo-rules'), api('/admin/update')]);
+  const [view, rules, updates, printers] = await Promise.all([api('/admin/settings'), api('/admin/photo-rules'), api('/admin/update'), api('/admin/printers')]);
+  readPrinters();
+  printersInfo = printers;
   if (!rulesDraft) rulesDraft = { default: rules.default ?? '', loadFolder: rules.loadFolder, rules: rules.rules.map((x) => ({ ...x })) };
   const groups = [...new Set(view.settings.map((s) => s.group))];
   return `
@@ -796,6 +979,7 @@ async function pageSettings() {
     </div>
     <div>
       ${rulesEditor(rules)}
+      ${printersPanel(printers)}
       <section class="panel">
         <h2>Admin code</h2>
         <p class="muted">Locks this board and the admin part of the iPads’ Server settings. It is kept on the server only as a hash. <b>Make a new code</b> picks 6 random digits; <b>Choose a code</b> lets you type one. Either way every other device has to enter the new code. The current code is always in <code>${esc(view.dataDir)}\\admin-code.txt</code> on the server. Forgot it and lost that file? Remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> and restart: the server makes up a new one.</p>
@@ -1061,7 +1245,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/printing" class="${name === 'printing' ? 'active' : ''}">Printing</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1195,6 +1379,7 @@ function bind() {
     saveDevice(e.target, { name: $('#device-name').value });
   });
   $('#main').addEventListener('input', (e) => {
+    if (e.target.closest('[data-printer]') && !printersDirty) { printersDirty = true; const out = $('#printers-saved'); if (out) out.textContent = 'Not saved yet.'; }
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
     if (e.target.id === 'photo-job-filter') { photoJobFilter = e.target.value; filterPhotoJobs(); }
   });
@@ -1260,6 +1445,7 @@ function bind() {
       redrawRules();
       return;
     }
+    if (t.closest('#printers') && await printerClick(t)) return;
     if (t.closest('[data-rules-reset]')) { rulesDraft = null; draw(); return; }
     if (t.closest('[data-rules-test]')) {
       const d = readRules();
@@ -1313,6 +1499,7 @@ function bind() {
     }
   });
   $('#main').addEventListener('change', (e) => {
+    if (e.target.closest('[data-printer]')) { readPrinters(); printersDirty = true; const out = $('#printers-saved'); if (out) out.textContent = 'Not saved yet.'; }
     if (e.target.matches('[data-color-pick]')) saveDevice($('#form-device'), { color: e.target.value });
   });
   $('#btn-photo-close').addEventListener('click', () => $('#dlg-photo').close());
