@@ -33,6 +33,7 @@ environment variables, or on the admin page (Settings > Photos). Restart the ser
 | Key | Default | Meaning |
 |---|---|---|
 | `PHOTOS_ENABLED` | `false` | `true` lets the app send photos. Off: the photo routes answer 403. |
+| `PHOTOS_PUBLIC` | `true` | The photo explorer (`/api/browse`, the app's Photos tile) works without the access key, look only. Anyone with the server's address can then see the photos. `false`: it needs the key too. |
 | `PHOTOS_ROOT` | none | Full path of the base folder. Required when on. Jobs go in `PHOTOS_ROOT\{job}` unless a rule says otherwise. |
 | `PHOTOS_RULES` | `photo-rules.json` | The rules file. A relative path is next to the exe. Missing file = no rules. |
 | `PHOTOS_MAX_MB` | `25` | Largest single photo, in MB. |
@@ -108,6 +109,28 @@ To check a rule without the app, list a load's photos (this creates nothing):
   starting with `.` (so `.deleted` and half-written uploads can't be reached), and it must be inside the
   load folder.
 
+## The photo explorer
+
+The app's home screen has a **Photos** tile and the admin board a **Photos** tab: every job with
+photos › its loads › the photos, newest first.
+
+- Jobs are found from the photo folders themselves, so photos from before this server, or copied in
+  by hand, show too. A job is looked for when PowerFab lists it (the list is read at most every 10
+  minutes), the database has a photo or stack for it, or `PHOTOS_ROOT` has a folder that is that job's
+  folder (the default layout). Its loads are the folders in its job folder that fit `loadFolder`
+  (`{load}` by default), plus any the database knows. Dot folders such as `.deleted` are left out.
+- Without the key (on by default, `PHOTOS_PUBLIC`) it is look only. With the key it also shows
+  where each job, load and photo is stored. Deleting is on the admin board only, behind the admin code.
+
+| Method | Path | Answer |
+|---|---|---|
+| GET | `/api/browse` | `{ "keyed", "jobs": [{ "job", "description", "loads", "photos", "lastAt", "folder" }] }`, newest job number first. `folder` only with the key. |
+| GET | `/api/browse/{job}` | `{ "keyed", "job", "folder", "loads": [{ "load", "photos", "lastAt", "folder" }] }` |
+| GET | `/api/browse/{job}/{load}` | `{ "keyed", "job", "load", "folder", "files": [{ "name", "bytes", "modified", "mark", "by", "color", "path" }] }`, oldest first. `folder` and `path` only with the key. |
+| GET | `/api/browse/{job}/{load}/{name}` | The photo itself. |
+
+These need no key unless `PHOTOS_PUBLIC` is `false` (then 401 without it); 403 while photos are off.
+
 ## API
 
 All need `Authorization: Bearer <ACCESS_KEY>`. Errors are JSON problem details with `detail` saying why.
@@ -119,7 +142,7 @@ All need `Authorization: Bearer <ACCESS_KEY>`. Errors are JSON problem details w
 | GET | `/api/photos/{job}/{load}` | `{ "job", "load", "files": [{ "name", "bytes", "modified", "mark", "by", "byId", "color" }] }`, oldest first. `by` is the iPad's current name. Empty list if the folder doesn't exist yet. Photos put in the folder by hand show up too, without `mark`/`by`. |
 | POST | `/api/photos/{job}/{load}` | `multipart/form-data`: one or more `file` fields, optional `mark` field (the piece the photos are of; left out = the whole load). Needs `X-Terra-Device`. 201 `{ "job", "load", "saved": [{ "name", "bytes" }] }`. |
 | GET | `/api/photos/{job}/{load}/{name}` | The photo itself, with its type (`image/jpeg`...). `{name}` is a name from the list. |
-| DELETE | `/api/photos/{job}/{load}/{name}` | Deletes it: the file is **moved** to a `.deleted` folder inside the load folder, never erased. `{ "job", "load", "deleted", "movedTo": ".deleted\\<name>" }`. |
+| DELETE | `/api/admin/photos/{job}/{load}/{name}` | Admin code only (`X-Terra-Admin`, see SETUP.md). Deletes it: the file is **moved** to a `.deleted` folder inside the load folder, never erased. `{ "job", "load", "deleted", "movedTo": ".deleted\\<name>" }`. |
 
 `{job}` is the PowerFab job number and `{load}` the load number (`8`), URL-encoded. Status codes:
 400 bad name or no files, 401 bad key, 403 photos off, 404 no such file, 413 too big or too many,
@@ -128,7 +151,8 @@ All need `Authorization: Bearer <ACCESS_KEY>`. Errors are JSON problem details w
 Every upload and delete is written to the activity history (who, which load, which piece) and sent
 live to the other iPads and the admin page, which refresh their photo lists.
 
-**Deleting.** The app deletes a photo only after a 1.5 second hold on its Delete button. On the server
+**Deleting.** Only with the admin code: on the admin board (Photos › job › load › Delete), or in the
+app's Photos window while that iPad is unlocked (a 1.5 second hold on its Delete button). On the server
 it lands in `<load folder>\.deleted\` (a second one with the same name gets ` (2)`), which the list,
 view and delete routes never show. To undo, move it back out of `.deleted`. To free the space, empty
 the `.deleted` folders by hand now and then, for example

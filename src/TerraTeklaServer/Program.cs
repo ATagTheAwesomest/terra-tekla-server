@@ -35,6 +35,7 @@ builder.Services.AddSingleton<AdminLock>();
 builder.Services.AddSingleton<Updater>();
 builder.Services.AddSingleton(settings.Photos);
 builder.Services.AddSingleton<PhotoStore>();
+builder.Services.AddSingleton<PhotoBrowser>();
 builder.Services.AddSingleton<Store>();
 builder.Services.AddSingleton<Hub>();
 builder.Services.AddHttpClient("conversion", c => c.Timeout = TimeSpan.FromSeconds(90));
@@ -47,6 +48,7 @@ var app = builder.Build();
 var store = app.Services.GetRequiredService<Store>();
 var hub = app.Services.GetRequiredService<Hub>();
 var photos = app.Services.GetRequiredService<PhotoStore>();
+var browser = app.Services.GetRequiredService<PhotoBrowser>();
 var settingsFile = app.Services.GetRequiredService<SettingsFile>();
 var adminLock = app.Services.GetRequiredService<AdminLock>();
 var updater = app.Services.GetRequiredService<Updater>();
@@ -63,6 +65,15 @@ if (adminLock.EnsureCode(AdminLock.CodeFilePath(settings.DataDir)) is not null)
     app.Logger.LogWarning("Admin code: see {File}.", AdminLock.CodeFilePath(settings.DataDir));
 
 hub.Changed += () => hub.Broadcast(new { type = "devices", devices = DeviceList() });
+browser.ReadPowerFabJobs = async ct =>
+{
+    if (settings.ConversionUrl == "")
+        return null;
+    var reply = await PowerFabAsync(app.Services.GetRequiredService<IHttpClientFactory>(), "ProductionControlJob_Get", "{}", ct);
+    if (reply.Error is not null || reply.Status >= 400)
+        return null;
+    return PowerFabJobs(JsonNode.Parse(reply.Body)).Select(j => (j.Number, j.Description)).ToList();
+};
 // Tell every iPad a new app is on the server, so it can offer to reload.
 updater.ClientUpdated += v => hub.Broadcast(new { type = "client-updated", version = v });
 
@@ -131,6 +142,80 @@ app.Map("/ws", async (HttpContext http) =>
     await hub.RunAsync(socket, deviceId, kind, new { type = "welcome", device, devices = DeviceList(), serverVersion = version, photosEnabled = settings.Photos.Enabled }, stop.Token);
     return Results.Empty;
 });
+
+// ---- Photo explorer (read only; without the access key unless PHOTOS_PUBLIC is false) -----------
+// With the key it also says where each job, load and photo is stored. Deleting is the admin board's
+// (DELETE /api/admin/photos/...).
+
+var browse = app.MapGroup("/api/browse").AddEndpointFilter(async (context, next) =>
+{
+    var http = context.HttpContext;
+    if (!settings.Photos.Enabled)
+        return PhotosDisabled();
+    var header = http.Request.Headers.Authorization.ToString();
+    var keyed = header.StartsWith("Bearer ", StringComparison.Ordinal) && KeyOk(header[7..]);
+    if (!keyed && !settings.Photos.Public)
+        return Results.Problem("The access key was refused.", statusCode: 401);
+    http.Items["keyed"] = keyed;
+    return await next(context);
+});
+
+browse.MapGet("/", (HttpContext http, CancellationToken ct) => PhotosAsync(async () =>
+{
+    var keyed = Keyed(http);
+    var jobs = await browser.JobsAsync(ct);
+    return Results.Json(new
+    {
+        keyed,
+        jobs = jobs.Select(j => new { job = j.Job, description = j.Description, loads = j.Loads, photos = j.Photos, lastAt = j.LastAt, folder = keyed ? j.Folder : null }),
+    });
+}));
+
+browse.MapGet("/{job}", (string job, HttpContext http) => PhotosAsync(() =>
+{
+    job = PhotoStore.CleanName(job, "Job");
+    var keyed = Keyed(http);
+    var loads = browser.Loads(job);
+    return Task.FromResult(Results.Json(new
+    {
+        keyed,
+        job,
+        folder = keyed ? browser.FolderOf(job) : null,
+        loads = loads.Select(l => new { load = l.Load, photos = l.Photos, lastAt = l.LastAt, folder = keyed ? l.Folder : null }),
+    }));
+}));
+
+browse.MapGet("/{job}/{load}", (string job, string load, HttpContext http) => PhotosAsync(() =>
+{
+    var keyed = Keyed(http);
+    var meta = store.Photos(job, load);
+    var devices = store.Devices().ToDictionary(d => d.Id);
+    var folder = photos.LoadFolder(job, load);
+    var files = photos.List(job, load).Select(f =>
+    {
+        meta.TryGetValue(f.Name, out var m);
+        var device = m?.DeviceId is { } id && devices.TryGetValue(id, out var d) ? d : null;
+        return new
+        {
+            name = f.Name,
+            bytes = f.Bytes,
+            modified = f.Modified,
+            mark = m?.Mark,
+            by = device?.Name ?? m?.DeviceName,
+            color = device?.Color,
+            path = keyed ? Path.Combine(folder, f.Name) : null,
+        };
+    });
+    return Task.FromResult(Results.Json(new { keyed, job, load, folder = keyed ? folder : null, files }));
+}));
+
+browse.MapGet("/{job}/{load}/{name}", (string job, string load, string name, HttpResponse response) => PhotosAsync(() =>
+{
+    var file = photos.Find(job, load, name);
+    response.Headers.XContentTypeOptions = "nosniff";
+    response.Headers.CacheControl = "private, max-age=3600";
+    return Task.FromResult(Results.File(file.FullName, PhotoStore.ContentType(file.Name), enableRangeProcessing: true));
+}));
 
 // ---- API (every route needs the access key) ---------------------------------------------------
 
@@ -319,6 +404,19 @@ admin.MapPost("/pin/generate", (HttpContext http) =>
     store.Log(Me(http) ?? AdminDevice, "admin", "Made a new admin code");
     return Results.Json(new { code = made.Code, token = made.Token, until = made.Until });
 });
+
+// Deletes a photo (admin code only): it is moved to the load's .deleted folder, not erased.
+admin.MapDelete("/photos/{job}/{load}/{name}", (string job, string load, string name, HttpContext http) => PhotosAsync(() =>
+{
+    var me = Me(http) ?? AdminDevice;
+    var movedTo = photos.Delete(job, load, name);
+    store.PhotoDeleted(job, load, name);
+    browser.Changed();
+    var item = store.Log(me, "photo-delete", $"Deleted photo {name}", job, null, load);
+    hub.Broadcast(new { type = "activity", items = new[] { item } });
+    hub.Broadcast(new { type = "photos", job, load });
+    return Task.FromResult(Results.Json(new { job, load, deleted = name, movedTo }));
+}));
 
 // Renaming and recolouring an iPad: the admin board only.
 admin.MapPut("/devices/{id}", (string id, DeviceUpdate update, HttpContext http) =>
@@ -533,18 +631,6 @@ api.MapGet("/photos/{job}/{load}/{name}", (string job, string load, string name,
     return Task.FromResult(Results.File(file.FullName, PhotoStore.ContentType(file.Name), enableRangeProcessing: true));
 }));
 
-// Deletes a photo: it is moved to the load's .deleted folder, not erased.
-api.MapDelete("/photos/{job}/{load}/{name}", (string job, string load, string name, HttpContext http) => PhotosAsync(() =>
-{
-    var me = Me(http) ?? AdminDevice;
-    var movedTo = photos.Delete(job, load, name);
-    store.PhotoDeleted(job, load, name);
-    var item = store.Log(me, "photo-delete", $"Deleted photo {name}", job, null, load);
-    hub.Broadcast(new { type = "activity", items = new[] { item } });
-    hub.Broadcast(new { type = "photos", job, load });
-    return Task.FromResult(Results.Json(new { job, load, deleted = name, movedTo }));
-}));
-
 api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext http, CancellationToken ct) =>
 {
     if (!settings.Photos.Enabled)
@@ -593,6 +679,7 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
             store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length);
             saved.Add(new { name, bytes = uploads[i].Length });
         }
+        browser.Changed();
         var item = store.Log(me, "photo", $"Took {saved.Count} photo{(saved.Count == 1 ? "" : "s")} of {(mark == "" ? "the whole load" : mark)}", job, null, load, mark == "" ? null : mark);
         hub.Broadcast(new { type = "activity", items = new[] { item } });
         hub.Broadcast(new { type = "photos", job, load });
@@ -858,6 +945,8 @@ async Task<IResult> PhotosAsync(Func<Task<IResult>> action)
         return Results.Problem($"The server's photo settings are wrong: {ex.Message}", statusCode: 500);
     }
 }
+
+static bool Keyed(HttpContext http) => http.Items["keyed"] is true;
 
 static IResult PhotosDisabled() =>
     Results.Problem("This server doesn't take photos (PHOTOS_ENABLED is off).", statusCode: 403);
