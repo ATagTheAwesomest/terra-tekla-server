@@ -180,7 +180,7 @@ public static class Ipp
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
         {
-            throw new PrinterException($"Couldn't reach the printer at {printerUri}: {ex.Message}");
+            throw new PrinterException($"Couldn't reach the printer at {printerUri}. Is it on and on the network? ({ex.Message.TrimEnd('.')})");
         }
         using (reply)
         {

@@ -115,7 +115,7 @@ public sealed class PrintService(IHttpClientFactory http, ILogger<PrintService> 
         }
         catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException && !ct.IsCancellationRequested)
         {
-            throw new PrinterException($"Couldn't send to {printer.Name} at {printer.Address}: {ex.Message}");
+            throw new PrinterException($"Couldn't send to {printer.Name} at {printer.Address}. Is it on and on the network? ({ex.Message.TrimEnd('.')})");
         }
         return (pages, null);
     }
