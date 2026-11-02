@@ -58,23 +58,22 @@ public sealed class ApiTests : IDisposable
     }
 
     [Fact]
-    public async Task A_new_device_gets_a_name_and_colour_and_can_change_them()
+    public async Task A_new_device_gets_a_fixed_user_number_and_cannot_rename_itself()
     {
         var a = Client("ipad-0000-a");
         var me = await a.GetFromJsonAsync<JsonObject>("/api/me");
-        Assert.Equal("iPad 1", (string?)me!["name"]);
+        Assert.Equal("User 1", (string?)me!["name"]);
+        Assert.Equal(1, (int)me["number"]!);
         Assert.StartsWith("#", (string?)me["color"]);
+        var b = await Client("ipad-0000-b").GetFromJsonAsync<JsonObject>("/api/me");
+        Assert.Equal(2, (int)b!["number"]!);
 
-        var renamed = await a.PutAsJsonAsync("/api/me", new { name = "Yard iPad", color = "#2bd96b" });
-        renamed.EnsureSuccessStatusCode();
-        Assert.Equal(HttpStatusCode.BadRequest, (await a.PutAsJsonAsync("/api/me", new { color = "green" })).StatusCode);
-
+        // Names and colours are the admin board's (behind the admin code), not the iPad's.
+        Assert.Equal(HttpStatusCode.Forbidden, (await a.PutAsJsonAsync("/api/me", new { name = "Yard iPad" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await a.PutAsJsonAsync("/api/admin/devices/ipad-0000-a", new { name = "Yard iPad" })).StatusCode);
+        Assert.NotEqual(HttpStatusCode.OK, (await a.PutAsJsonAsync("/api/devices/ipad-0000-a", new { name = "Yard iPad" })).StatusCode);
         var devices = await a.GetFromJsonAsync<JsonArray>("/api/devices");
-        var device = devices!.Single()!;
-        Assert.Equal("Yard iPad", (string?)device["name"]);
-        Assert.Equal("#2bd96b", (string?)device["color"]);
-        var history = await a.GetFromJsonAsync<JsonArray>("/api/activity?device=ipad-0000-a");
-        Assert.Contains(history!, h => (string?)h!["kind"] == "device-rename");
+        Assert.Equal("User 1", (string?)devices!.Single(d => (string?)d!["id"] == "ipad-0000-a")!["user"]);
     }
 
     [Fact]
@@ -102,7 +101,7 @@ public sealed class ApiTests : IDisposable
         var jobs = await a.GetFromJsonAsync<JsonArray>("/api/jobs");
         Assert.Equal(1, (int)jobs!.Single()!["pieces"]!);
         var history = await a.GetFromJsonAsync<JsonArray>("/api/activity?load=L1");
-        Assert.Contains(history!, h => (string?)h!["kind"] == "scan" && (string?)h["deviceName"] == "iPad 1");
+        Assert.Contains(history!, h => (string?)h!["kind"] == "scan" && (string?)h["deviceName"] == "User 1");
     }
 
     [Fact]

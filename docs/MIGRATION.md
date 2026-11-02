@@ -155,10 +155,10 @@ to Safari, so it starts with empty settings.
 1. Safari: `https://<your hostname>/`. The app loads from the server.
 2. Menu > **Server settings / Admin**: leave **Server address** blank (blank = this server), enter
    the **access key**, or type/scan the **setup code** the script printed, then Save.
-3. Set this iPad's **name and colour** in the same place.
+3. It gets a fixed number ("User 3") as its name. Rename and recolour it on the admin board.
 4. **Share > Add to Home Screen**. Delete the old TERRA icon (the github.io one).
 
-The first iPad (or the admin board) to ask for the admin code sets it.
+The server made up the admin code itself: it is in `C:\TerraTeklaServer\data\admin-code.txt` until you change it on the admin board.
 
 Make a printed QR of the setup code if you like (`node tools/setup-qr.mjs` in terra-tekla-client,
 or any QR maker): the app's Server settings reads it with the camera or the scanner. It contains
@@ -173,7 +173,7 @@ the key: keep it off walls and photos.
 - **iPad**: Safari > the address > Share > **Add to Home Screen**. Or from the app: Server settings /
   Admin > Open admin board.
 
-It asks for the access key once per browser, then the admin code (first time: set one).
+It asks for the access key once per browser, then the admin code (the first one is in `C:\TerraTeklaServer\data\admin-code.txt`).
 
 ## What happens to the data
 

@@ -3,8 +3,8 @@
 // from this cache only when it doesn't. Nothing from /api is ever kept: the data, and the access
 // key and admin code checks, always go to the server.
 
-const CACHE = 'terra-admin-v1';
-const SHELL = ['./', './index.html', './admin.css', './admin.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = 'terra-admin-v2';
+const SHELL = ['./', './index.html', './admin.css', './admin.js', './manifest.webmanifest', './vendor/qrcode.js', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));

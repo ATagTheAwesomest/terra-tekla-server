@@ -68,8 +68,13 @@ function Warn($text) { Write-Host "   !!  $text" -ForegroundColor Yellow }
 function Todo($text) { $todo.Add($text); Write-Host "   TODO $text" -ForegroundColor Yellow }
 function Ask($question) {
     if ($Yes) { Write-Host "   $question [y/N] y (-Yes)"; return $true }
-    $answer = Read-Host "   $question [y/N]"
-    return $answer -match '^(y|yes)$'
+    # Anything but a clear yes or no asks again, so a typo ("yy") isn't taken as no.
+    for (;;) {
+        $answer = (Read-Host "   $question [y/N]").Trim()
+        if ($answer -match '^(y|yes)$') { return $true }
+        if ($answer -match '^(n|no)?$') { return $false }
+        Write-Host '   Type y or n.'
+    }
 }
 # Written as it goes, so a run that stops half way can still be undone.
 function Add-Rollback($line) {
@@ -411,8 +416,8 @@ Write-Host ''
 Write-Host '   Then, on each iPad:' -ForegroundColor Cyan
 $where = if ($PublicHostname) { "https://$($PublicHostname -replace '^https?://', '' -replace '/.*$', '')/" } else { 'https://<your hostname>/' }
 Info "1. Safari > $where > Server settings / Admin > leave Server address blank, enter the key (or the setup code) > Save."
-Info '2. Set its name and colour there. 3. Share > Add to Home Screen. 4. Delete the old GitHub Pages TERRA icon.'
-Info "Admin board: $($where)admin/ (Add to Home Screen / Install app the same way). First visit sets the admin code."
+Info '2. Share > Add to Home Screen. 3. Delete the old GitHub Pages TERRA icon. 4. Rename it on the admin board (Devices).'
+Info "Admin board: $($where)admin/ (Add to Home Screen / Install app the same way). Admin code: in $InstallDir\data\admin-code.txt until you change it."
 if ($todo.Count) {
     Write-Host ''
     Write-Host '   Still to do by hand:' -ForegroundColor Yellow

@@ -234,3 +234,10 @@ td.path { font-family: ui-monospace, Consolas, monospace; font-size: .82rem; wor
 tr.not-pf td:first-child b { color: var(--muted); }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn:disabled:hover { border-color: #444; }
+
+/* Admin code just made, and the iPad setup QR */
+.new-code { margin-top: 12px; padding: 12px 16px; border: 2px solid var(--accent, #ffc400); border-radius: 10px; }
+.new-code .code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 2.4rem; letter-spacing: 0.2em; margin: 4px 0; }
+.setup-qr svg { display: block; width: min(320px, 100%); height: auto; background: #fff; border-radius: 8px; }
+.setup-qr .setup-text { display: block; overflow-wrap: anywhere; margin-top: 6px; }
+.device-user { font-size: 0.8rem; color: var(--muted, #a6a6a6); font-family: ui-monospace, Menlo, Consolas, monospace; }

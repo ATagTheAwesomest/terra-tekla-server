@@ -94,9 +94,13 @@ still asks the server for everything: key and code included.
 never comes up; a desk keyboard's digits work too). The same code opens the admin board and the
 admin part of the iPad app's **Server settings / Admin**.
 
-- The first time it is needed (on the admin board or an iPad), it asks to **set** a code (twice).
-  After that it can only be changed with the current one (admin board > Settings); changing it
-  locks every other device out.
+- **The server makes up the first code itself**: the first time it starts without one, it picks 6
+  random digits, keeps only their hash and writes the code to `DATA_DIR\admin-code.txt`
+  (`C:\TerraTeklaServer\data\admin-code.txt`; `install-service.ps1` and `deploy.ps1` print it).
+  Nobody who merely reaches the server can pick it.
+- It is changed only on the admin board (Settings > Admin code), with the current code: **Make a new
+  code** (6 new random digits, shown once) or **Choose a code**. Changing it deletes
+  `admin-code.txt` and locks every other device out.
 - Entering it unlocks **that device, from that IP address, for 30 minutes** (`ADMIN_LOCK_MINUTES`),
   then it locks again. The iPad app and the admin board share the unlock on the same iPad. Lock now
   ends it early; a server restart ends every unlock.
@@ -108,19 +112,23 @@ admin part of the iPad app's **Server settings / Admin**.
   believes from 127.0.0.1.
 - 5 wrong codes in a row block every try for 30 s, then 1 min, 2 min... up to 15 min.
 - Forgot it: on the server, remove the `ADMIN_PIN_HASH` line from `local.settings.json` and restart
-  the service.
+  the service. The server makes up a new one in `admin-code.txt`.
 
 ### Server settings on the iPads
 
 The iPad app has one entry for all of it, **Server settings / Admin** (side menu, and the home
 screen tile before the first setup). In it:
 
-- **This iPad**: its name and colour, sounds, sending photos. No code needed.
-- **Admin** (admin code): open the admin board, change the server connection (address, access key,
-  setup QR), update the app on the server, update the server.
+- **This iPad**: its fixed number ("User 3"), its name and colour (shown, not changed: they are set
+  on the admin board), sounds, sending photos (on unless turned off).
+- **Admin**: one **Unlock admin** button. Only after the code do the admin buttons appear: open the
+  admin board, change the server connection (address, access key, setup QR), update the app on the
+  server, update the server.
 
-The server connection is open until it is first saved; after that it needs the code. If the server
-can't be reached at all (or refuses the saved key), the code can't be checked, so the connection
+The server connection is open until it is first saved; after that it needs the code. The address is
+filled in with the site the app was opened from. A connection is only saved once that server has
+answered as a TERRA server and taken the key, so a typo can't lock an iPad out. If the saved server
+can't be reached, or answers but not as a TERRA server, the code can't be checked, so the connection
 opens without it to be fixed.
 
 ### Updates (from the admin board or an iPad)
@@ -149,16 +157,17 @@ that service; the iPads reconnect by themselves a few seconds later.
 
 ### Admin routes
 
-All need the access key and, except the first four, `X-Terra-Admin: <token>` from the same IP
+All need the access key and, except the first three, `X-Terra-Admin: <token>` from the same IP
 address that got it.
 
 | Route | |
 |---|---|
 | `GET /api/admin/lock` | Whether a code is set, whether this token is unlocked, seconds until tries are taken again. |
-| `POST /api/admin/setup` `{"pin"}` | Sets the first code (409 once one is set). Answers `{"token","until"}`. |
 | `POST /api/admin/unlock` `{"pin"}` | Answers `{"token","until"}`; 403 wrong code, 429 blocked. |
 | `POST /api/admin/lock` | Ends this token. |
 | `PUT /api/admin/pin` `{"current","pin"}` | Changes the code. |
+| `POST /api/admin/pin/generate` `{"pin"}` | A new random 6-digit code in place of the current one (`pin`). Answers `{"code","token","until"}`. |
+| `PUT /api/admin/devices/{id}` `{"name"?,"color"?}` | Renames / recolours an iPad. Name 1-40 characters, colour `#rrggbb`. |
 | `GET/PUT /api/admin/settings` | The editable settings / save some (`{"KEY": "value"}`; a secret left out or null is kept). |
 | `POST /api/admin/test-conversion` `{"url"}` | Whether that address answers like the conversion layer. |
 | `GET/PUT /api/admin/photo-rules`, `POST /api/admin/photo-rules/test` | The photo folder rules; where a job's photos would go. |
@@ -215,10 +224,11 @@ offline or installed to the home screen.
 ### Setting up an iPad
 
 1. Open the server's address in Safari (`https://terra.example.com/`). The app loads from the server.
-2. Menu > Server settings: leave **Server address** blank (it means "this server"), enter the
-   **Access key**, Save. Or scan a setup code made on another iPad's Server settings.
-3. In the same dialog, set this iPad's **name** and **colour**. They show on everything it scans, on
-   its photos and in the history. They can also be changed from the admin page.
+2. Menu > Server settings: the **Server address** is already this site; enter the **Access key**,
+   Save. Or scan the setup QR from the admin board (Settings > Set up an iPad).
+3. The server gives it the next fixed number ("User 4") as its name. Rename and recolour it on the
+   admin board (Devices > the iPad). The name and colour show on everything it scans, on its photos
+   and in the history.
 4. Share > Add to Home Screen.
 
 An iPad that used the GitHub Pages copy keeps working against this server if its Server address is
@@ -251,8 +261,11 @@ stack per load.
 ## How the iPads stay in sync
 
 - Each iPad makes up a device id once (kept in the app's storage) and sends it on every request
-  (`X-Terra-Device`). The first time the server sees an id it creates the device as "iPad N" with
-  the next colour.
+  (`X-Terra-Device`). The first time the server sees an id it creates the device with the next fixed
+  number, named "User N", with the next colour. The number never changes or gets reused; the name
+  and colour are changed on the admin board only. Anything per iPad later (for example its own
+  PowerFab login, picked by the `/api/powerfab` pass-through from `X-Terra-Device`) hangs off this
+  device record.
 - Every change to a load's stacks is an **operation** (below) the app applies on screen at once, then
   sends to `POST /api/loads/{loadId}/ops`. The server applies it to its copy, saves it, answers the
   load as it now is, and sends it to every connected iPad over `/ws`. The server's copy wins.
@@ -286,10 +299,9 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | GET | `/health` | No key. `{ "status": "ok", "version" }`. |
 | GET | `/api/status` | Server version, whether a key is set, the iPad app folder and version, photos on/off, the conversion layer's health, the database path. |
 | POST | `/api/powerfab/{command}` | Sent on to the conversion layer's `/api/powerfab/{command}` with `CONVERSION_KEY`; its answer comes back as it is. The conversion layer refusing that key answers 502. |
-| GET | `/api/me` | This device (needs `X-Terra-Device`): `{ id, name, color, createdAt, lastSeenAt, ... }`. |
-| PUT | `/api/me` | `{ "name"?, "color"? }`: rename / recolour this device. Name 1-40 characters, colour `#rrggbb`. |
-| GET | `/api/devices` | Every device, with `online` and `onlineSince`. |
-| PUT | `/api/devices/{id}` | Same as `PUT /api/me` for any device (the admin page). |
+| GET | `/api/me` | This device (needs `X-Terra-Device`): `{ id, number, user, name, color, createdAt, lastSeenAt, ... }`. `user` is "User {number}". |
+| PUT | `/api/me` | Always 403: an iPad can't rename itself. |
+| GET | `/api/devices` | Every device, with `number`, `user`, `online` and `onlineSince`. |
 | GET | `/api/jobs` | Jobs the server has stacks for: `[{ job, loads, pieces, lastAt }]`. |
 | GET | `/api/jobs/{job}/loads` | Every load of a job the server has, as load states (below). |
 | GET | `/api/loads/{loadId}?job=&number=` | One load's state. A load not seen before answers an empty state with one stack (not saved until changed). |
@@ -381,7 +393,7 @@ is running. Times are UTC ISO-8601 text.
 | Table | Columns | Holds |
 |---|---|---|
 | `meta` | `key`, `value` | `rev`: the last revision handed out. |
-| `devices` | `id`, `name`, `color`, `created_at`, `last_seen_at`, `last_ip`, `user_agent`, `app_version` | Every iPad seen. |
+| `devices` | `id`, `number`, `name`, `color`, `created_at`, `last_seen_at`, `last_ip`, `user_agent`, `app_version` | Every iPad seen. `number` is fixed and unique (devices from before it are numbered by when first seen). |
 | `loads` | `load_id`, `job`, `load_number`, `rev`, `updated_at`, `check_started_at`, `check_updated_at`, `recent_ops` (JSON), `removed` (JSON) | One row per load with stacks. |
 | `stacks` | `load_id`, `id`, `position`, `name`, `created_by` | Stacks in order. |
 | `entries` | `load_id`, `id`, `stack_id`, `position`, `mark`, `sequence`, `manual`, `pending`, `removing`, `scanned_at`, `scanned_by`, `added_at`, `rev`, `details` (JSON) | Rows (pieces) in each stack. |

@@ -69,6 +69,12 @@ $url = $settings.Urls -replace '0\.0\.0\.0|\*|\+', '127.0.0.1'
 try {
     $health = Invoke-RestMethod "$url/health"
     Write-Host "Deployed $commit. Health: $($health | ConvertTo-Json -Compress)"
+
+    # The admin code the server made up the first time it started, until it is changed on the admin board.
+    $dataDir = if ($settings.DATA_DIR) { $settings.DATA_DIR } else { 'data' }
+    if (-not [IO.Path]::IsPathRooted($dataDir)) { $dataDir = Join-Path $InstallDir $dataDir }
+    $codeFile = Join-Path $dataDir 'admin-code.txt'
+    if (Test-Path $codeFile) { Write-Host "Admin code (until you change it on the admin board): $((Get-Content $codeFile -TotalCount 1).Trim())" }
 } catch {
     throw "Deployed $commit, but $url/health did not respond: $($_.Exception.Message)"
 }
