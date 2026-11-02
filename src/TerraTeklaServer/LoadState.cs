@@ -41,7 +41,23 @@ public sealed class Stack
     public string Id { get; set; } = "";
     public string Name { get; set; } = "";
     public string? CreatedBy { get; set; }
+    /// <summary>Set when the stack is a pallet: many of one mark, scanned once with a quantity.</summary>
+    public Pallet? Pallet { get; set; }
     public List<Entry> Items { get; set; } = [];
+}
+
+/// <summary>
+/// A pallet: a stack of one mark that was scanned once with a quantity, instead of piece by piece.
+/// It still has one row per piece (so totals, sync, export and the truck check work the same as any
+/// stack); the app shows it as one line, "mark × quantity". A pallet needs photos of the stack
+/// (<see cref="Photos"/> is how many were taken when it was made).
+/// </summary>
+public sealed class Pallet
+{
+    public string Mark { get; set; } = "";
+    public int Photos { get; set; }
+    /// <summary>The mark was typed on the keypad, not scanned.</summary>
+    public bool Manual { get; set; }
 }
 
 /// <summary>
@@ -83,6 +99,8 @@ public sealed class CheckScan
     public bool Manual { get; set; }
     public string ScannedAt { get; set; } = "";
     public string? ScannedBy { get; set; }
+    /// <summary>How many pieces of the mark the scan checks off: 1, or a whole pallet's count.</summary>
+    public int Qty { get; set; } = 1;
 }
 
 public sealed record Removal(string Mark, string Sequence, long Rev, DateTime At);

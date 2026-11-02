@@ -164,6 +164,18 @@ function who(id, fallback = '') {
   return `<a class="who" style="--c:${esc(d?.color ?? '#777')}" href="#/device/${enc(id)}">${esc(d?.name ?? fallback ?? id)}</a>`;
 }
 
+// Who took a photo: the iPad (linked, in its colour) and its fixed "User N". Photos from before
+// the server kept that say what their file name says ("probably"), or "unknown".
+function photoWho(p) {
+  const id = p.byId ?? p.deviceId;
+  const d = deviceOf(id);
+  const user = d?.user ?? p.user;
+  const name = d?.name ?? p.by ?? p.deviceName;
+  if (!id && !name) return '<span class="muted">taken by unknown</span>';
+  const link = id ? who(id, name) : `<span class="who" style="--c:${esc(p.color ?? '#777')}">${esc(name ?? user)}</span>`;
+  return `${p.byGuess ? '<span class="muted">probably</span> ' : ''}${link}${user && user !== name ? ` <span class="muted">(${esc(user)})</span>` : ''}`;
+}
+
 // ---- Truck check (the same matching as the app's js/check.js) --------------------------
 
 function cleanMark(m) {
@@ -182,9 +194,14 @@ function checkStatus(state) {
   const checked = new Map();
   let extras = 0;
   for (const scan of state.truckCheck?.scans ?? []) {
-    const id = queues.get(cleanMark(scan.mark))?.shift();
-    if (id) checked.set(id, scan);
-    else extras++;
+    // A pallet is checked with one scan for all its pieces (scan.qty).
+    let short = false;
+    for (let i = 0; i < Math.max(1, Number(scan.qty) || 1); i++) {
+      const id = queues.get(cleanMark(scan.mark))?.shift();
+      if (id) checked.set(id, scan);
+      else short = true;
+    }
+    if (short) extras++;
   }
   return { total, checked, extras, complete: total > 0 && checked.size === total && !extras };
 }
@@ -234,7 +251,7 @@ async function photoGrid(list, { empty = 'No photos.', deletable = false } = {})
     <figure class="photo" style="--c:${esc(deviceOf(p.byId ?? p.deviceId)?.color ?? p.color ?? '#555')}" data-photo="${esc(`${p.job}|${p.load ?? p.loadNumber}|${p.name ?? p.fileName}`)}">
       <button type="button" data-photo-open aria-label="View photo"><img alt=""></button>
       <figcaption class="cap">${esc(p.mark || 'Whole load')}
-        <span>${who(p.byId ?? p.deviceId, p.by ?? p.deviceName ?? 'unknown')} · ${p.job ? `<a href="#/job/${enc(p.job)}">${esc(p.job)}</a> load ${esc(p.load ?? p.loadNumber)}` : ''}</span>
+        <span>${photoWho(p)} · ${p.job ? `<a href="#/job/${enc(p.job)}">${esc(p.job)}</a> load ${esc(p.load ?? p.loadNumber)}` : ''}</span>
         <span>${esc(when(p.modified ?? p.takenAt))}</span>
         ${deletable ? `<span class="path">${esc(p.name ?? p.fileName)}</span><button class="btn btn-small danger" type="button" data-photo-delete>Delete</button>` : ''}</figcaption>
     </figure>`).join('')}</div>`;
@@ -400,8 +417,9 @@ async function pageLoad(loadId, query) {
   const focus = query.get('stack');
   const stacks = state.stacks.map((st) => {
     const w = st.items.reduce((n, e) => n + (Number(e.weight) || 0), 0);
+    const pallet = st.pallet ? `<span class="pill">Pallet: ${num(st.items.length)} × <span class="mark">${esc(st.pallet.mark)}</span> · ${num(st.pallet.photos)} photo${st.pallet.photos === 1 ? '' : 's'}</span>` : '';
     return `<section class="stack" id="stack-${esc(st.id)}"${st.id === focus ? ' style="outline:2px solid var(--accent)"' : ''}>
-      <div class="stack-head"><b>${esc(st.name)}</b><span class="muted">${st.items.length} pcs · ${lbs(w)}</span>${st.createdBy ? `<span class="muted">made by ${who(st.createdBy)}</span>` : ''}</div>
+      <div class="stack-head"><b>${esc(st.name)}</b>${pallet}<span class="muted">${st.items.length} pcs · ${lbs(w)}</span>${st.createdBy ? `<span class="muted">made by ${who(st.createdBy)}</span>` : ''}</div>
       ${st.items.length ? `<table><thead><tr><th>#</th><th>Mark</th><th>Seq</th><th>Description</th><th class="num">Weight</th><th>Scanned by</th><th>When</th>${state.truckCheck ? '<th>Checked</th>' : ''}</tr></thead><tbody>
       ${st.items.map((e, i) => {
         const scan = check.checked.get(e.id);

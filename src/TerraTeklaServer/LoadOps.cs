@@ -105,9 +105,18 @@ public static class LoadOps
         var wanted = Str(op, "name").Trim();
         var name = wanted != "" && !NameTaken(s, wanted) ? wanted : NextStackName(s);
         var stack = new Stack { Id = id, Name = name, CreatedBy = ctx.DeviceId };
+        if (op["pallet"] is JsonObject pallet)
+            stack.Pallet = new Pallet
+            {
+                Mark = Required(pallet, "mark"),
+                Photos = Math.Max(0, Int(pallet, "photos")),
+                Manual = Bool(pallet, "manual"),
+            };
         var after = s.Stacks.FindIndex(st => st.Id == Str(op, "afterStackId"));
         s.Stacks.Insert(after < 0 ? s.Stacks.Count : after + 1, stack);
-        activity.Add(new("stack-add", $"Added {name}", StackId: id, StackName: name));
+        activity.Add(stack.Pallet is { } p
+            ? new("pallet-add", $"Started pallet {name} of {p.Mark} with {p.Photos} photo{(p.Photos == 1 ? "" : "s")} of it{(p.Manual ? ", mark typed on keypad" : "")}", p.Mark, id, name)
+            : new("stack-add", $"Added {name}", StackId: id, StackName: name));
         return true;
     }
 
@@ -148,6 +157,8 @@ public static class LoadOps
         if (hit is null || target is null)
             return false;
         var (from, fromIndex, entry) = hit.Value;
+        if (from != target && target.Pallet is { } pallet && !entry.Mark.Equals(pallet.Mark, StringComparison.OrdinalIgnoreCase))
+            throw new OpException($"{target.Name} is a pallet of {pallet.Mark}, so {entry.Mark} can't go in it.");
         var at = Math.Clamp(Int(op, "index"), 0, target.Items.Count);
         if (from == target && fromIndex < at)
             at--;
@@ -167,31 +178,42 @@ public static class LoadOps
     /// A scan the app is about to send to PowerFab: a row in the scanning iPad's active stack, shown
     /// on every iPad as "loading" straight away. finishScan or failScan follows.
     /// </summary>
+    /// A pallet sends every piece's row at once, in <c>entryIds</c>.
     static bool BeginScan(LoadState s, JsonObject op, OpContext ctx)
     {
-        var id = Required(op, "entryId");
-        if (FindEntry(s, id) is not null)
-            return false;
-        var stack = FindStack(s, Str(op, "stackId")) ?? s.Stacks[^1];
-        stack.Items.Add(new Entry
+        var ids = EntryIds(op);
+        var mark = Required(op, "mark");
+        var stack = FindStack(s, Str(op, "stackId")) ?? LastPlainStack(s);
+        if (stack.Pallet is { } pallet && !mark.Equals(pallet.Mark, StringComparison.OrdinalIgnoreCase))
+            throw new OpException($"{stack.Name} is a pallet of {pallet.Mark}, so {mark} can't go in it.");
+        var added = false;
+        foreach (var id in ids)
         {
-            Id = id,
-            Mark = Required(op, "mark"),
-            Manual = Bool(op, "manual"),
-            ScannedAt = ctx.NowIso,
-            ScannedBy = ctx.DeviceId,
-            Pending = true,
-            AddedAt = ctx.NowIso,
-            Rev = ctx.Rev,
-        });
-        return true;
+            if (FindEntry(s, id) is not null)
+                continue;
+            stack.Items.Add(new Entry
+            {
+                Id = id,
+                Mark = mark,
+                Manual = Bool(op, "manual"),
+                ScannedAt = ctx.NowIso,
+                ScannedBy = ctx.DeviceId,
+                Pending = true,
+                AddedAt = ctx.NowIso,
+                Rev = ctx.Rev,
+            });
+            added = true;
+        }
+        return added;
     }
 
     /// <summary>PowerFab loaded the piece: the row gets the piece's details (sequence, weight...).</summary>
     static bool FinishScan(LoadState s, JsonObject op, OpContext ctx, List<ActivityItem> activity)
     {
-        var id = Required(op, "entryId");
         var piece = op["piece"] as JsonObject ?? [];
+        if (op["entryIds"] is JsonArray)
+            return FinishMany(s, EntryIds(op), piece, ctx, activity);
+        var id = Required(op, "entryId");
         var hit = FindEntry(s, id);
         if (hit is null)
         {
@@ -212,8 +234,44 @@ public static class LoadOps
         return true;
     }
 
+    /// <summary>Several rows PowerFab loaded in one go (a pallet): one history line for them all.</summary>
+    static bool FinishMany(LoadState s, List<string> ids, JsonObject piece, OpContext ctx, List<ActivityItem> activity)
+    {
+        var done = new List<(Stack Stack, Entry Entry)>();
+        foreach (var id in ids)
+        {
+            if (FindEntry(s, id) is not { } hit || (!hit.Entry.Pending && hit.Entry.Details is not null))
+                continue;
+            hit.Entry.Pending = false;
+            hit.Entry.Rev = ctx.Rev;
+            hit.Entry.Sequence = Str(piece, "sequence");
+            hit.Entry.Details = DetailsOf(piece);
+            done.Add((hit.Stack, hit.Entry));
+        }
+        if (done.Count == 0)
+            return false;
+        var (stack, entry) = done[0];
+        activity.Add(new("scan", $"Loaded {done.Count} × {entry.Mark}{(entry.Sequence != "" ? $" (seq {entry.Sequence})" : "")} into {stack.Name}{(entry.Manual ? ", typed on keypad" : "")}", entry.Mark, stack.Id, stack.Name));
+        return true;
+    }
+
     static bool FailScan(LoadState s, JsonObject op, List<ActivityItem> activity)
     {
+        if (op["entryIds"] is JsonArray)
+        {
+            var gone = 0;
+            (Stack Stack, int Index, Entry Entry)? first = null;
+            foreach (var id in EntryIds(op))
+            {
+                if (FindEntry(s, id) is not { } h)
+                    continue;
+                first ??= h;
+                h.Stack.Items.RemoveAt(h.Index);
+                gone++;
+            }
+            activity.Add(new("refused", gone > 1 ? $"{RefusedText(op)} ({gone} pieces)" : RefusedText(op), first?.Entry.Mark ?? Str(op, "mark"), first?.Stack.Id, first?.Stack.Name));
+            return gone > 0;
+        }
         var hit = FindEntry(s, Required(op, "entryId"));
         var mark = hit?.Entry.Mark ?? Str(op, "mark");
         activity.Add(new("refused", RefusedText(op), mark, hit?.Stack.Id, hit?.Stack.Name));
@@ -232,23 +290,35 @@ public static class LoadOps
 
     static bool SetRemoving(LoadState s, JsonObject op, bool on)
     {
-        var hit = FindEntry(s, Required(op, "entryId"));
-        if (hit is null || hit.Value.Entry.Removing == on)
-            return false;
-        hit.Value.Entry.Removing = on;
-        return true;
+        var changed = false;
+        foreach (var id in EntryIds(op))
+        {
+            var hit = FindEntry(s, id);
+            if (hit is null || hit.Value.Entry.Removing == on)
+                continue;
+            hit.Value.Entry.Removing = on;
+            changed = true;
+        }
+        return changed;
     }
 
     /// <summary>PowerFab took the piece off the load: the row goes.</summary>
     static bool RemoveEntry(LoadState s, JsonObject op, OpContext ctx, List<ActivityItem> activity)
     {
-        var hit = FindEntry(s, Required(op, "entryId"));
-        if (hit is null)
+        var gone = new List<(Stack Stack, Entry Entry)>();
+        foreach (var id in EntryIds(op))
+        {
+            if (FindEntry(s, id) is not { } hit)
+                continue;
+            var (stack, index, entry) = hit;
+            stack.Items.RemoveAt(index);
+            s.Removed.Add(new Removal(entry.Mark, entry.Sequence, ctx.Rev, ctx.Now));
+            gone.Add((stack, entry));
+        }
+        if (gone.Count == 0)
             return false;
-        var (stack, index, entry) = hit.Value;
-        stack.Items.RemoveAt(index);
-        s.Removed.Add(new Removal(entry.Mark, entry.Sequence, ctx.Rev, ctx.Now));
-        activity.Add(new("unload", $"Took {entry.Mark} off the load (from {stack.Name})", entry.Mark, stack.Id, stack.Name));
+        var (from, first) = gone[0];
+        activity.Add(new("unload", $"Took {(gone.Count > 1 ? $"{gone.Count} × " : "")}{first.Mark} off the load (from {from.Name})", first.Mark, from.Id, from.Name));
         return true;
     }
 
@@ -342,7 +412,7 @@ public static class LoadOps
                 if (target is null)
                 {
                     var last = s.Stacks[^1];
-                    if (last.Items.Count == 0)
+                    if (last.Items.Count == 0 && last.Pallet is null)
                         target = last;
                     else
                     {
@@ -394,9 +464,11 @@ public static class LoadOps
         if (s.TruckCheck.Scans.Any(x => x.Id == id))
             return false;
         var mark = Required(op, "mark");
-        s.TruckCheck.Scans.Add(new CheckScan { Id = id, Mark = mark, Manual = Bool(op, "manual"), ScannedAt = ctx.NowIso, ScannedBy = ctx.DeviceId });
+        // A pallet is checked with one scan for all its pieces.
+        var qty = Math.Clamp(Int(op, "qty"), 1, MaxPallet);
+        s.TruckCheck.Scans.Add(new CheckScan { Id = id, Mark = mark, Manual = Bool(op, "manual"), ScannedAt = ctx.NowIso, ScannedBy = ctx.DeviceId, Qty = qty });
         s.TruckCheck.UpdatedAt = ctx.NowIso;
-        activity.Add(new("check", $"Truck check: {mark}", mark));
+        activity.Add(new("check", qty > 1 ? $"Truck check: pallet of {qty} × {mark}" : $"Truck check: {mark}", mark));
         return true;
     }
 
@@ -441,6 +513,29 @@ public static class LoadOps
 
     static string Key(string mark, string sequence) => $"{mark}|{sequence}";
 
+    /// <summary>The most pieces one pallet (one operation) can have.</summary>
+    public const int MaxPallet = 2000;
+
+    /// <summary>The rows an operation is about: <c>entryIds</c> (a pallet's pieces) or the one <c>entryId</c>.</summary>
+    static List<string> EntryIds(JsonObject op)
+    {
+        if (op["entryIds"] is not JsonArray list)
+            return [Required(op, "entryId")];
+        if (list.Count == 0)
+            throw new OpException($"\"entryIds\" is empty for {Str(op, "op")}.");
+        if (list.Count > MaxPallet)
+            throw new OpException($"At most {MaxPallet} pieces at once.");
+        var ids = new List<string>(list.Count);
+        foreach (var node in list)
+        {
+            var id = node is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : "";
+            if (id == "" || id.Length > 200)
+                throw new OpException($"\"entryIds\" has an empty or too long id for {Str(op, "op")}.");
+            ids.Add(id);
+        }
+        return ids;
+    }
+
     static bool NameTaken(LoadState s, string name) => s.Stacks.Any(st => st.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Next unused "Stack &lt;load&gt; - N", as the app names them.</summary>
@@ -450,6 +545,16 @@ public static class LoadOps
         while (NameTaken(s, $"Stack {s.LoadNumber} - {n}"))
             n++;
         return $"Stack {s.LoadNumber} - {n}";
+    }
+
+    /// <summary>Where a scan for a stack that is gone lands: the last stack that isn't a pallet (a new one if all are).</summary>
+    static Stack LastPlainStack(LoadState s)
+    {
+        if (s.Stacks.LastOrDefault(st => st.Pallet is null) is { } plain)
+            return plain;
+        var stack = new Stack { Id = $"plain-{s.Stacks.Count}-{s.Rev}", Name = NextStackName(s) };
+        s.Stacks.Add(stack);
+        return stack;
     }
 
     static Stack? FindStack(LoadState s, string id) => id == "" ? null : s.Stacks.FirstOrDefault(st => st.Id == id);

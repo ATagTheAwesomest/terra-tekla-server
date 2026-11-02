@@ -184,4 +184,25 @@ public sealed class ApiTests : IDisposable
                 return json;
         }
     }
+
+    [Fact]
+    public async Task A_pallet_and_a_pallet_check_are_kept_by_the_server()
+    {
+        var a = Client("ipad-0000-a");
+        (await a.PostAsJsonAsync("/api/loads/L2/ops", new { op = "addStack", opId = "o1", job = "J1", loadNumber = "9", stackId = "p1", name = "Pallet CL-1", pallet = new { mark = "CL-1", photos = 4 } })).EnsureSuccessStatusCode();
+        (await a.PostAsJsonAsync("/api/loads/L2/ops", new { op = "beginScan", opId = "o2", job = "J1", loadNumber = "9", stackId = "p1", mark = "CL-1", entryIds = new[] { "p1-1", "p1-2", "p1-3" } })).EnsureSuccessStatusCode();
+        (await a.PostAsJsonAsync("/api/loads/L2/ops", new { op = "finishScan", opId = "o3", job = "J1", loadNumber = "9", entryIds = new[] { "p1-1", "p1-2", "p1-3" }, piece = new { mark = "CL-1", sequence = "1", weight = 20 } })).EnsureSuccessStatusCode();
+        (await a.PostAsJsonAsync("/api/loads/L2/ops", new { op = "addCheck", opId = "o4", job = "J1", loadNumber = "9", scanId = "c1", mark = "CL-1", qty = 3 })).EnsureSuccessStatusCode();
+
+        // A fresh server process reads it back from the database.
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        var store = new Store(new Settings("", "", "", "", dataDir, [], new PhotoSettings(false, "", "", 1, 1, [])));
+        var load = await store.GetAsync("L2", "J1", "9");
+        var pallet = load.Stacks.Single(st => st.Id == "p1");
+        Assert.Equal("CL-1", pallet.Pallet!.Mark);
+        Assert.Equal(4, pallet.Pallet.Photos);
+        Assert.Equal(3, pallet.Items.Count);
+        Assert.Equal(3, load.TruckCheck!.Scans.Single().Qty);
+        Assert.Null(load.Stacks[0].Pallet);
+    }
 }

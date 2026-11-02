@@ -130,4 +130,89 @@ public sealed class PhotoBrowseTests : IDisposable
         Assert.Equal(HttpStatusCode.Unauthorized, (await server.CreateClient().GetAsync("/api/browse")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Keyed(server).GetAsync("/api/browse")).StatusCode);
     }
+
+    [Fact]
+    public async Task Every_photo_says_which_ipad_user_took_it_in_the_file_and_the_explorer()
+    {
+        var server = Server();
+        var ipad = Keyed(server);
+        await Upload(ipad, "1001", "8", 1);
+
+        var listed = (await server.CreateClient().GetFromJsonAsync<JsonObject>("/api/browse/1001/8"))!["files"]!.AsArray().Single()!;
+        Assert.Equal("User 1", (string?)listed["user"]);
+        Assert.Equal("User 1", (string?)listed["by"]);
+        Assert.False((bool)listed["byGuess"]!);
+        var keyedList = (await ipad.GetFromJsonAsync<JsonObject>("/api/photos/1001/8"))!["files"]!.AsArray().Single()!;
+        Assert.Equal("User 1", (string?)keyedList["user"]);
+        var recent = (await ipad.GetFromJsonAsync<JsonArray>("/api/photos/recent"))!.Single()!;
+        Assert.Equal("User 1", (string?)recent["user"]);
+
+        // Written into the JPEG itself: EXIF Artist and XMP, readable once the file is copied elsewhere.
+        var saved = Directory.GetFiles(Path.Combine(PhotoRoot, "1001", "8")).Single();
+        var bytes = await File.ReadAllBytesAsync(saved);
+        var text = System.Text.Encoding.Latin1.GetString(bytes);
+        Assert.Contains("Exif\0\0II*", text);
+        Assert.Contains("<terra:User>User 1</terra:User>", text);
+        Assert.Contains("<dc:creator><rdf:Seq><rdf:li>User 1</rdf:li>", text);
+        Assert.Equal(("User 1", "User 1"), PhotoMetadata.ReadUser(saved));
+        Assert.Equal(new byte[] { 0xFF, 0xD9 }, bytes[^2..]);
+    }
+
+    [Fact]
+    public async Task Photos_from_before_show_who_took_them_as_far_as_can_be_told()
+    {
+        var server = Server();
+        var folder = Path.Combine(PhotoRoot, "1003", "5");
+        Directory.CreateDirectory(folder);
+        // From an older server: the iPad's name is only in the file name.
+        await File.WriteAllBytesAsync(Path.Combine(folder, "20261028-101500_1001-C1_Yard iPad.jpg"), Jpeg);
+        await File.WriteAllBytesAsync(Path.Combine(folder, "20261028-101501_load_Yard iPad (2).jpg"), Jpeg);
+        // Copied in by hand: nothing to go on.
+        await File.WriteAllBytesAsync(Path.Combine(folder, "old.jpg"), Jpeg);
+        // Stamped by this server, but the database has no record of it (moved from another job).
+        var tag = new PhotoTag("User 4", "Shop iPad", "dev-x", "1003", "5", null, DateTime.Now);
+        await File.WriteAllBytesAsync(Path.Combine(folder, "moved.jpg"), PhotoMetadata.StampJpeg(Jpeg, tag));
+
+        var files = (await server.CreateClient().GetFromJsonAsync<JsonObject>("/api/browse/1003/5"))!["files"]!.AsArray()
+            .ToDictionary(f => (string)f!["name"]!);
+        Assert.Equal("Yard iPad", (string?)files["20261028-101500_1001-C1_Yard iPad.jpg"]!["by"]);
+        Assert.True((bool)files["20261028-101500_1001-C1_Yard iPad.jpg"]!["byGuess"]!);
+        Assert.Equal("Yard iPad", (string?)files["20261028-101501_load_Yard iPad (2).jpg"]!["by"]);
+        Assert.Null((string?)files["old.jpg"]!["by"]);
+        Assert.Equal("User 4", (string?)files["moved.jpg"]!["user"]);
+        Assert.Equal("Shop iPad", (string?)files["moved.jpg"]!["by"]);
+    }
+
+    [Fact]
+    public void A_camera_photo_keeps_its_own_exif_and_gets_only_the_xmp()
+    {
+        // SOI, APP1 Exif (camera's), DQT..., EOI.
+        byte[] exif = [0xFF, 0xE1, 0, 10, (byte)'E', (byte)'x', (byte)'i', (byte)'f', 0, 0, 1, 2];
+        byte[] jpeg = [0xFF, 0xD8, .. exif, 0xFF, 0xDB, 0, 3, 7, 0xFF, 0xD9];
+        var tag = new PhotoTag("User 2", "Yard <iPad>", "dev-y", "1001", "8", "1001-C1", DateTime.Now);
+        var stamped = PhotoMetadata.StampJpeg(jpeg, tag);
+        var text = System.Text.Encoding.Latin1.GetString(stamped);
+        Assert.Equal(1, text.Split("Exif\0\0").Length - 1);
+        Assert.Contains("User 2 (Yard &lt;iPad&gt;)", text);
+        // The camera's EXIF is untouched and still first; XMP follows it; the image data is unchanged.
+        Assert.Equal(exif, stamped[2..14]);
+        Assert.Equal(0xE1, stamped[15]);
+        Assert.Equal(jpeg[14..], stamped[^jpeg[14..].Length..]);
+        // Not a JPEG: left alone.
+        byte[] png = [0x89, 0x50, 0x4E, 0x47];
+        Assert.Same(png, PhotoMetadata.StampJpeg(png, tag));
+    }
+
+    [Fact]
+    public async Task A_photo_that_waited_on_the_ipad_keeps_the_time_it_was_taken()
+    {
+        var server = Server();
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Jpeg), "file", "p.jpg");
+        var taken = DateTime.UtcNow.AddDays(-2).Date.AddHours(12);
+        form.Add(new StringContent(taken.ToString("o")), "takenAt");
+        Assert.Equal(HttpStatusCode.Created, (await Keyed(server).PostAsync("/api/photos/1001/8", form)).StatusCode);
+        var text = System.Text.Encoding.Latin1.GetString(await File.ReadAllBytesAsync(Directory.GetFiles(Path.Combine(PhotoRoot, "1001", "8")).Single()));
+        Assert.Contains(taken.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss"), text);
+    }
 }

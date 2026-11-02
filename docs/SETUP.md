@@ -341,22 +341,31 @@ All carry `op`, `opId` (unique, made by the app), `job` and `loadNumber`. Ids (`
 
 | `op` | Fields | Does |
 |---|---|---|
-| `addStack` | `stackId`, `name`?, `afterStackId`? | New stack after the given one (or last). A missing or taken name becomes the next "Stack {load} - N". |
+| `addStack` | `stackId`, `name`?, `afterStackId`?, `pallet`? | New stack after the given one (or last). A missing or taken name becomes the next "Stack {load} - N". With `pallet: { mark, photos, manual }` it is a pallet (see below). |
 | `rename` | `stackId`, `name` | Renames a stack (spaces squeezed, up to 60 characters). |
 | `removeStack` | `stackId` | Deletes the stack. The app takes its pieces off the load in PowerFab first. |
 | `moveEntryTo` | `entryId`, `stackId`, `index` | Moves a row to position `index` of a stack (counted before the move). |
-| `beginScan` | `entryId`, `mark`, `manual`, `stackId`? | A scan started: a "waiting on PowerFab" row in that stack (or the last). |
-| `finishScan` | `entryId`, `mark`, `manual`, `stackId`?, `piece` | PowerFab assigned and loaded it: the row gets `piece`'s details and sequence. |
-| `failScan` | `entryId`, `mark`, `title`?, `message`? | PowerFab refused it: the row goes, the refusal goes in the history. |
+| `beginScan` | `entryId` or `entryIds`, `mark`, `manual`, `stackId`? | A scan started: a "waiting on PowerFab" row in that stack (or the last stack that isn't a pallet). `entryIds` makes one row per id (a pallet's pieces). |
+| `finishScan` | `entryId` or `entryIds`, `mark`, `manual`, `stackId`?, `piece` | PowerFab assigned and loaded it: the row(s) get `piece`'s details and sequence (one history line for all of them). |
+| `failScan` | `entryId` or `entryIds`, `mark`, `title`?, `message`? | PowerFab refused it: the row(s) go, the refusal goes in the history. |
 | `refused` | `mark`, `title`?, `message`? | History only: a scan refused before it got a row (too many, not on the job, shipped load...). |
-| `markRemoving` / `unmarkRemoving` | `entryId` | A row is being taken off in PowerFab / that failed. |
-| `removeEntry` | `entryId` | PowerFab took it off the load: the row goes. |
+| `markRemoving` / `unmarkRemoving` | `entryId` or `entryIds` | Rows being taken off in PowerFab / that failed. |
+| `removeEntry` | `entryId` or `entryIds` | PowerFab took them off the load: the rows go. |
 | `sync` | `pieces: [{ mark, sequence, n, ...details }]`, `knownRev` | Brings the stacks in line with what PowerFab has loaded (see sync above). |
 | `startCheck` / `resetCheck` | | Starts / clears the shared truck check. |
-| `addCheck` | `scanId`, `mark`, `manual` | A piece checked on the truck. |
+| `addCheck` | `scanId`, `mark`, `manual`, `qty`? | A piece checked on the truck; `qty` > 1 checks that many of the mark at once (a whole pallet). |
 | `removeCheck` | `scanId` | Undo one check. |
 | `log` | `kind`, `text`, `mark`? | History only, for things done in PowerFab: `ship`, `unship`, `return`, `unreturn`, `load-create`, `check-complete`. |
 | `clear` | | The load was deleted in PowerFab: back to one empty stack. History stays. |
+
+**Pallets.** A pallet is a stack of one mark the iPad scans once with a quantity, instead of piece by
+piece (bolts, clips, plates on a pallet). It still has one row per piece, so totals, weight (unit
+weight × quantity), the sync with PowerFab, the export and the truck check all work as for any stack;
+the app and the admin board show it as one line, "mark × quantity". The stack's `pallet` holds the
+mark, how many photos of it were taken when it was made (the app asks for at least 3), and whether
+the mark was typed. A pallet only takes its own mark: a `beginScan` or `moveEntryTo` of another mark
+into it is refused, and pieces PowerFab loaded by itself never go into one. At most 2000 rows per
+operation.
 
 ### Live connection (`/ws`)
 
@@ -398,11 +407,11 @@ is running. Times are UTC ISO-8601 text.
 | `meta` | `key`, `value` | `rev`: the last revision handed out. |
 | `devices` | `id`, `number`, `name`, `color`, `created_at`, `last_seen_at`, `last_ip`, `user_agent`, `app_version` | Every iPad seen. `number` is fixed and unique (devices from before it are numbered by when first seen). |
 | `loads` | `load_id`, `job`, `load_number`, `rev`, `updated_at`, `check_started_at`, `check_updated_at`, `recent_ops` (JSON), `removed` (JSON) | One row per load with stacks. |
-| `stacks` | `load_id`, `id`, `position`, `name`, `created_by` | Stacks in order. |
+| `stacks` | `load_id`, `id`, `position`, `name`, `created_by`, `pallet` (JSON, null for a plain stack) | Stacks in order. |
 | `entries` | `load_id`, `id`, `stack_id`, `position`, `mark`, `sequence`, `manual`, `pending`, `removing`, `scanned_at`, `scanned_by`, `added_at`, `rev`, `details` (JSON) | Rows (pieces) in each stack. |
-| `check_scans` | `load_id`, `id`, `position`, `mark`, `manual`, `scanned_at`, `scanned_by` | Shared truck check scans. |
+| `check_scans` | `load_id`, `id`, `position`, `mark`, `manual`, `scanned_at`, `scanned_by`, `qty` | Shared truck check scans (`qty` > 1: a whole pallet). |
 | `activity` | `id`, `at`, `device_id`, `device_name`, `kind`, `job`, `load_id`, `load_number`, `stack_id`, `stack_name`, `mark`, `text` | The history. `device_name` is the name at the time. |
-| `photos` | `id`, `job`, `load_number`, `file_name`, `mark`, `device_id`, `device_name`, `bytes`, `taken_at`, `deleted_at` | A record of each photo saved. |
+| `photos` | `id`, `job`, `load_number`, `file_name`, `mark`, `device_id`, `device_name`, `device_number`, `bytes`, `taken_at`, `deleted_at` | A record of each photo saved. `device_number` is the iPad's fixed "User N". |
 
 Handy queries (`sqlite3 terra.db`):
 
