@@ -158,7 +158,7 @@ to Safari, so it starts with empty settings.
 3. It gets a fixed number ("User 3") as its name. Rename and recolour it on the admin board.
 4. **Share > Add to Home Screen**. Delete the old TERRA icon (the github.io one).
 
-The server made up the admin code itself: it is in `C:\TerraTeklaServer\data\admin-code.txt` until you change it on the admin board.
+The server made up the admin code itself: it is in `C:\TerraTeklaServer\data\admin-code.txt`, which always holds the code in use.
 
 Make a printed QR of the setup code if you like (`node tools/setup-qr.mjs` in terra-tekla-client,
 or any QR maker): the app's Server settings reads it with the camera or the scanner. It contains

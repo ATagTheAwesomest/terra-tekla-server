@@ -264,6 +264,11 @@ async function pageHome() {
         <div class="devices">${devices.length ? devices.map(deviceCard).join('') : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}</div>
       </section>
       <section class="panel">
+        <h2>Set up an iPad</h2>
+        <p class="muted">On the iPad: open this site in Safari, then Server settings / Admin › Scan QR with camera (or scan this with the barcode scanner into the setup code box). It holds this server’s address and the access key, so don’t share a photo of it.</p>
+        <div class="setup-qr" id="setup-qr">${qrHtml || QR_BUTTON}</div>
+      </section>
+      <section class="panel">
         <h2>Server</h2>
         ${healthList()}
       </section>
@@ -494,7 +499,7 @@ async function unlock() {
   if (lock.unlocked) { drawLockButton(); return true; }
   let error = lock.retryAfter ? `Too many wrong codes. Try again in ${lock.retryAfter} s.` : '';
   for (;;) {
-    const pin = await openPinPad({ title: 'Admin code', note: 'The admin board is locked. It stays open on this device for 30 minutes after the code. First time? The server made one up: it is in data\\admin-code.txt in the server’s install folder.', error });
+    const pin = await openPinPad({ title: 'Admin code', note: 'The admin board is locked. It stays open on this device for 30 minutes after the code. The code in use is in data\\admin-code.txt in the server’s install folder.', error });
     if (pin === null) return false;
     try {
       const r = await api('/admin/unlock', { method: 'POST', body: { pin } });
@@ -728,14 +733,9 @@ async function pageSettings() {
       ${rulesEditor(rules)}
       <section class="panel">
         <h2>Admin code</h2>
-        <p class="muted">Locks this board and the admin part of the iPads’ Server settings. It is kept on the server only as a hash. <b>Make a new code</b> picks 6 random digits and shows them once; <b>Choose a code</b> lets you type one. Either needs the current code and locks every other device out. Forgot it? On the server, remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> and restart: the server makes a new one and writes it to <code>${esc(view.dataDir)}\\admin-code.txt</code>.</p>
+        <p class="muted">Locks this board and the admin part of the iPads’ Server settings. It is kept on the server only as a hash. <b>Make a new code</b> picks 6 random digits; <b>Choose a code</b> lets you type one. Either way every other device has to enter the new code. The current code is always in <code>${esc(view.dataDir)}\\admin-code.txt</code> on the server. Forgot it and lost that file? Remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> and restart: the server makes up a new one.</p>
         <div class="form-foot"><button class="btn primary" type="button" data-generate-pin>Make a new code</button><button class="btn" type="button" data-change-pin>Choose a code</button><button class="btn" type="button" data-lock-now>Lock now</button><span class="muted" id="pin-saved"></span></div>
         <div class="new-code" id="new-code" hidden></div>
-      </section>
-      <section class="panel">
-        <h2>Set up an iPad</h2>
-        <p class="muted">On the iPad: open this site in Safari, then Server settings / Admin › Scan QR with camera (or scan this with the barcode scanner into the setup code box). It holds this server’s address and the access key, so don’t share a photo of it.</p>
-        <div class="setup-qr" id="setup-qr"><button class="btn" type="button" data-show-qr>Show setup QR code</button></div>
       </section>
       <section class="panel" id="updates">${updatesPanel(updates)}</section>
       <section class="panel">
@@ -863,22 +863,17 @@ async function waitForServer(limit, expectDown) {
 
 // A new random code from the server, shown once.
 async function generatePin() {
-  let error = '';
-  for (;;) {
-    const current = await openPinPad({ title: 'Current code', note: 'Enter the code in use now. The server then makes up a new one.', error, okLabel: 'Make new code' });
-    if (current === null) return;
-    try {
-      const r = await api('/admin/pin/generate', { method: 'POST', body: { pin: current } });
-      setAdminToken(r.token, r.until);
-      const box = $('#new-code');
-      box.innerHTML = `<p>The new admin code:</p><p class="code">${esc(r.code)}</p><p class="muted">Write it down now: it isn’t shown again. Other devices have to enter it.</p>`;
-      box.hidden = false;
-      $('#pin-saved').textContent = '';
-      return;
-    } catch (err) {
-      if (err.problem?.locked) { draw(); return; }
-      error = err.message;
-    }
+  if (!window.confirm('Make a new random admin code? The old one stops working, and every other device has to enter the new one.')) return;
+  try {
+    const r = await api('/admin/pin/generate', { method: 'POST' });
+    setAdminToken(r.token, r.until);
+    const box = $('#new-code');
+    box.innerHTML = `<p>The new admin code:</p><p class="code">${esc(r.code)}</p><p class="muted">It is also in admin-code.txt on the server. Other devices have to enter it.</p>`;
+    box.hidden = false;
+    $('#pin-saved').textContent = '';
+  } catch (err) {
+    $('#pin-saved').textContent = err.message;
+    if (err.problem?.locked) draw();
   }
 }
 
@@ -888,6 +883,9 @@ function setupCode() {
   const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)));
   return `TERRACFG:${b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
 }
+
+const QR_BUTTON = '<button class="btn" type="button" data-show-qr>Show setup QR code</button>';
+let qrHtml = ''; // kept while shown, so a live redraw of the page doesn't hide it
 
 async function showSetupQr() {
   const box = $('#setup-qr');
@@ -905,32 +903,52 @@ async function showSetupQr() {
   const qr = self.qrcode(0, 'M');
   qr.addData(code);
   qr.make();
-  box.innerHTML = `${qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })}
+  qrHtml = `${qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })}
     <p class="muted">Address: <code>${esc(location.origin)}</code></p>
     <details><summary>Setup code as text</summary><code class="setup-text">${esc(code)}</code></details>
     <button class="btn" type="button" data-hide-qr>Hide</button>`;
+  if ($('#setup-qr')) $('#setup-qr').innerHTML = qrHtml;
 }
 
 async function changePin() {
-  const current = await openPinPad({ title: 'Current code', note: 'Enter the code in use now.', okLabel: 'Next' });
-  if (current === null) return;
   let error = '';
   for (;;) {
-    const pin = await openPinPad({ title: 'New code', note: '4 to 8 digits.', error, okLabel: 'Next' });
+    const pin = await openPinPad({ title: 'New admin code', note: 'Type the new code you want, 4 to 8 digits.', error, okLabel: 'Next' });
     if (pin === null) return;
     const again = await openPinPad({ title: 'New code again', note: 'The same new code, to be sure.', okLabel: 'Change code' });
     if (again === null) return;
     if (pin !== again) { error = 'The two codes didn’t match. Start again.'; continue; }
     try {
-      const r = await api('/admin/pin', { method: 'PUT', body: { current, pin } });
+      const r = await api('/admin/pin', { method: 'PUT', body: { pin } });
       setAdminToken(r.token, r.until);
-      $('#pin-saved').textContent = 'Code changed. Other browsers have to enter the new one.';
+      $('#new-code').hidden = true;
+      $('#pin-saved').textContent = 'Code changed (and written to admin-code.txt). Other devices have to enter the new one.';
     } catch (err) {
       $('#pin-saved').textContent = err.message;
       if (err.problem?.locked) draw();
     }
     return;
   }
+}
+
+// The id a docs heading gets, for the contents links.
+function docId(text) {
+  return `doc-${text.toLowerCase().replace(/[`*]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`;
+}
+
+// Jump-to links for a doc's ## and ### headings (not inside code blocks).
+function docContents(md) {
+  let code = false;
+  const items = [];
+  for (const line of md.replace(/\r/g, '').split('\n')) {
+    if (line.startsWith('```')) code = !code;
+    const m = !code && line.match(/^(##|###) (.+)/);
+    if (m) items.push({ level: m[1].length, text: m[2] });
+  }
+  if (items.length < 3) return '';
+  const plain = (t) => esc(t.replace(/[`*]/g, ''));
+  return `<nav class="panel doc-toc" aria-label="Contents"><h2>Contents</h2><ul>${items.map((h) =>
+    `<li class="toc-${h.level}"><a href="#" data-jump="${docId(h.text)}">${plain(h.text)}</a></li>`).join('')}</ul></nav>`;
 }
 
 // A small Markdown reader for the docs: headings, paragraphs, lists, tables, code.
@@ -949,7 +967,7 @@ function markdown(md) {
       out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`);
     } else if (/^#{1,4} /.test(line)) {
       const n = line.match(/^#+/)[0].length;
-      out.push(`<h${n}>${inline(line.slice(n + 1))}</h${n}>`);
+      out.push(`<h${n} id="${docId(line.slice(n + 1))}">${inline(line.slice(n + 1))}</h${n}>`);
     } else if (line.startsWith('|')) {
       const rows = [];
       for (; i < lines.length && lines[i].startsWith('|'); i++) rows.push(lines[i]);
@@ -979,7 +997,9 @@ function markdown(md) {
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
   return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a></div>
-    <article class="panel doc">${markdown(text)}</article>`;
+    ${docContents(text)}
+    <article class="panel doc">${markdown(text)}</article>
+    <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
 }
 
 // ---- Router ---------------------------------------------------------------------------
@@ -1118,8 +1138,16 @@ function bind() {
     if (t.closest('[data-update]')) { startUpdate(t.closest('[data-update]').dataset.update); return; }
     if (t.closest('[data-change-pin]')) { changePin(); return; }
     if (t.closest('[data-generate-pin]')) { generatePin(); return; }
+    const jump = t.closest('[data-jump]');
+    if (jump) {
+      e.preventDefault();
+      const target = jump.dataset.jump === 'top' ? null : document.getElementById(jump.dataset.jump);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      else window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
     if (t.closest('[data-show-qr]')) { showSetupQr(); return; }
-    if (t.closest('[data-hide-qr]')) { $('#setup-qr').innerHTML = '<button class="btn" type="button" data-show-qr>Show setup QR code</button>'; return; }
+    if (t.closest('[data-hide-qr]')) { qrHtml = ''; $('#setup-qr').innerHTML = QR_BUTTON; return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }
     if (t.closest('[data-download]')) {
       // A plain link can't send the key and code, so fetch it and hand the browser the file.

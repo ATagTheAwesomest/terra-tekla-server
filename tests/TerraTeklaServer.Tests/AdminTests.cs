@@ -68,7 +68,7 @@ public sealed class AdminTests : IDisposable
         var code = await MadeUpCode();
         var unlocked = await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = code });
         var token = (string)(await unlocked.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
-        var reply = await Client(token).PutAsJsonAsync("/api/admin/pin", new { current = code, pin });
+        var reply = await Client(token).PutAsJsonAsync("/api/admin/pin", new { pin });
         Assert.Equal(HttpStatusCode.OK, reply.StatusCode);
         return (string)(await reply.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
     }
@@ -102,9 +102,9 @@ public sealed class AdminTests : IDisposable
         Assert.Contains("pbkdf2-sha256$", file);
         Assert.Contains("MaxConcurrentConnections", file);
 
-        // Changing it deletes the written-down code.
+        // Changing it writes the new code down in its place.
         var token = await Setup("2468");
-        Assert.False(File.Exists(AdminLock.CodeFilePath(dataDir)));
+        Assert.StartsWith("2468", File.ReadAllText(AdminLock.CodeFilePath(dataDir)));
         Assert.Equal(HttpStatusCode.OK, (await Client(token).GetAsync("/api/admin/stats")).StatusCode);
     }
 
@@ -152,16 +152,17 @@ public sealed class AdminTests : IDisposable
     }
 
     [Fact]
-    public async Task A_new_random_code_needs_the_current_one_and_is_shown_once()
+    public async Task A_new_random_code_needs_an_unlocked_device_and_is_written_down()
     {
         var token = await Setup("2468");
-        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsJsonAsync("/api/admin/pin/generate", new { pin = "2468" })).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await Client(token).PostAsJsonAsync("/api/admin/pin/generate", new { pin = "9999" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsync("/api/admin/pin/generate", null)).StatusCode);
 
-        var made = await (await Client(token).PostAsJsonAsync("/api/admin/pin/generate", new { pin = "2468" })).Content.ReadFromJsonAsync<JsonObject>();
+        var made = await (await Client(token).PostAsync("/api/admin/pin/generate", null)).Content.ReadFromJsonAsync<JsonObject>();
         var code = (string)made!["code"]!;
         Assert.Matches("^[0-9]{6}$", code);
+        Assert.StartsWith(code, File.ReadAllText(AdminLock.CodeFilePath(dataDir)));
         Assert.Equal(HttpStatusCode.OK, (await Client((string)made["token"]!).GetAsync("/api/admin/stats")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client(token).GetAsync("/api/admin/stats")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = "2468" })).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = code })).StatusCode);
     }
@@ -187,13 +188,13 @@ public sealed class AdminTests : IDisposable
     }
 
     [Fact]
-    public async Task Changing_the_code_needs_the_current_one_and_signs_out_others()
+    public async Task Changing_the_code_needs_an_unlocked_device_and_signs_out_others()
     {
         var first = await Setup("2468");
         var other = (string)(await (await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = "2468" })).Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
 
-        Assert.Equal(HttpStatusCode.Forbidden, (await Client(first).PutAsJsonAsync("/api/admin/pin", new { current = "9999", pin = "13579" })).StatusCode);
-        var changed = await Client(first).PutAsJsonAsync("/api/admin/pin", new { current = "2468", pin = "13579" });
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PutAsJsonAsync("/api/admin/pin", new { pin = "13579" })).StatusCode);
+        var changed = await Client(first).PutAsJsonAsync("/api/admin/pin", new { pin = "13579" });
         Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
         var token = (string)(await changed.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
 

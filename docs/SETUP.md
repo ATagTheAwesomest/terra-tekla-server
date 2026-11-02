@@ -98,9 +98,10 @@ admin part of the iPad app's **Server settings / Admin**.
   random digits, keeps only their hash and writes the code to `DATA_DIR\admin-code.txt`
   (`C:\TerraTeklaServer\data\admin-code.txt`; `install-service.ps1` and `deploy.ps1` print it).
   Nobody who merely reaches the server can pick it.
-- It is changed only on the admin board (Settings > Admin code), with the current code: **Make a new
-  code** (6 new random digits, shown once) or **Choose a code**. Changing it deletes
-  `admin-code.txt` and locks every other device out.
+- It is changed only on the admin board (Settings > Admin code), on a device that is unlocked:
+  **Make a new code** (6 new random digits) or **Choose a code**. `admin-code.txt` always holds the
+  code in use: it is rewritten on every change. Changing it locks every other device out.
+  (A code set before v0.3.2 is written there the first time it is changed.)
 - Entering it unlocks **that device, from that IP address, for 30 minutes** (`ADMIN_LOCK_MINUTES`),
   then it locks again. The iPad app and the admin board share the unlock on the same iPad. Lock now
   ends it early; a server restart ends every unlock.
@@ -112,7 +113,7 @@ admin part of the iPad app's **Server settings / Admin**.
   believes from 127.0.0.1.
 - 5 wrong codes in a row block every try for 30 s, then 1 min, 2 min... up to 15 min.
 - Forgot it: on the server, remove the `ADMIN_PIN_HASH` line from `local.settings.json` and restart
-  the service. The server makes up a new one in `admin-code.txt`.
+  the service. The server makes up a new one in `admin-code.txt`. (Or read the current one there.)
 
 ### Server settings on the iPads
 
@@ -165,8 +166,8 @@ address that got it.
 | `GET /api/admin/lock` | Whether a code is set, whether this token is unlocked, seconds until tries are taken again. |
 | `POST /api/admin/unlock` `{"pin"}` | Answers `{"token","until"}`; 403 wrong code, 429 blocked. |
 | `POST /api/admin/lock` | Ends this token. |
-| `PUT /api/admin/pin` `{"current","pin"}` | Changes the code. |
-| `POST /api/admin/pin/generate` `{"pin"}` | A new random 6-digit code in place of the current one (`pin`). Answers `{"code","token","until"}`. |
+| `PUT /api/admin/pin` `{"pin"}` | Changes the code (this device is unlocked already, so the current one isn't asked again). Rewrites `admin-code.txt`. |
+| `POST /api/admin/pin/generate` | A new random 6-digit code in place of the current one, also written to `admin-code.txt`. Answers `{"code","token","until"}`. |
 | `PUT /api/admin/devices/{id}` `{"name"?,"color"?}` | Renames / recolours an iPad. Name 1-40 characters, colour `#rrggbb`. |
 | `GET/PUT /api/admin/settings` | The editable settings / save some (`{"KEY": "value"}`; a secret left out or null is kept). |
 | `POST /api/admin/test-conversion` `{"url"}` | Whether that address answers like the conversion layer. |
