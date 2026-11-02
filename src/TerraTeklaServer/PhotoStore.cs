@@ -16,7 +16,7 @@ public sealed class BadPhotoException(string message, int statusCode) : Exceptio
 }
 
 /// <summary>The photo settings (PHOTOS_* in local.settings.json, see docs/PHOTOS.md).</summary>
-public sealed record PhotoSettings(bool Enabled, string Root, string RulesPath, long MaxBytes, int MaxFiles, string[] Types)
+public sealed record PhotoSettings(bool Enabled, string Root, string RulesPath, long MaxBytes, int MaxFiles, string[] Types, bool Public = true)
 {
     public static readonly string[] AllTypes = ["jpg", "png", "heic", "webp", "pdf"];
 
@@ -40,7 +40,9 @@ public sealed record PhotoSettings(bool Enabled, string Root, string RulesPath, 
         if (types.Length == 0)
             types = AllTypes;
 
-        var settings = new PhotoSettings(enabled, root, rules, (long)(maxMb * 1024 * 1024), maxFiles, types);
+        // Public: the read-only photo explorer works without the access key (on unless set to false).
+        var isPublic = !bool.TryParse(config["PHOTOS_PUBLIC"], out var pub) || pub;
+        var settings = new PhotoSettings(enabled, root, rules, (long)(maxMb * 1024 * 1024), maxFiles, types, isPublic);
         if (!enabled)
             return settings;
 
@@ -215,6 +217,67 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
         if (name.Length > 40)
             name = name[..40].Trim();
         return name.TrimEnd('.').Trim();
+    }
+
+    /// <summary>
+    /// The loads that have a folder in a job's folder, worked out backwards from the load folder
+    /// pattern (<c>loadFolder</c> in the rules, "{load}" by default). Folders that don't fit it, and
+    /// dot folders such as .deleted, are left out.
+    /// </summary>
+    public IReadOnlyList<(string Load, string Folder)> LoadsIn(string job)
+    {
+        var rules = LoadRules();
+        var jobFolder = new DirectoryInfo(JobFolder(job, rules).Folder);
+        if (!jobFolder.Exists)
+            return [];
+        var pattern = "^" + Placeholder.Replace(Regex.Escape(rules.LoadFolder).Replace("\\{", "{"), m =>
+            m.Groups[1].Value.Equals("load", StringComparison.OrdinalIgnoreCase) ? "(?<load>.+?)"
+            : m.Groups[1].Value.Equals("job", StringComparison.OrdinalIgnoreCase) ? Regex.Escape(job) : ".+?") + "$";
+        var found = new List<(string, string)>();
+        foreach (var dir in jobFolder.EnumerateDirectories())
+        {
+            if (dir.Name.StartsWith('.'))
+                continue;
+            var m = Regex.Match(dir.Name, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(200));
+            if (!m.Success || !m.Groups["load"].Success)
+                continue;
+            var load = m.Groups["load"].Value;
+            try
+            {
+                // Only a folder this load really saves into counts.
+                if (string.Equals(Path.GetFullPath(LoadFolder(job, load, rules)), dir.FullName, StringComparison.OrdinalIgnoreCase))
+                    found.Add((load, dir.FullName));
+            }
+            catch (BadNameException)
+            {
+            }
+        }
+        return found;
+    }
+
+    /// <summary>Folders directly in PHOTOS_ROOT that are a job's folder under the rules (the default layout).</summary>
+    public IEnumerable<string> JobsUnderRoot()
+    {
+        var root = new DirectoryInfo(settings.Root);
+        if (settings.Root == "" || !root.Exists)
+            yield break;
+        var rules = LoadRules();
+        foreach (var dir in root.EnumerateDirectories())
+        {
+            if (dir.Name.StartsWith('.'))
+                continue;
+            string? job = null;
+            try
+            {
+                if (string.Equals(Path.GetFullPath(JobFolder(dir.Name, rules).Folder), dir.FullName, StringComparison.OrdinalIgnoreCase))
+                    job = dir.Name;
+            }
+            catch (Exception ex) when (ex is BadNameException or PhotoRulesException)
+            {
+            }
+            if (job is not null)
+                yield return job;
+        }
     }
 
     /// <summary>The files already saved for a load, oldest first.</summary>

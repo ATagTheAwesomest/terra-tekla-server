@@ -441,6 +441,19 @@ public sealed class Store
             .GroupBy(p => p.FileName).ToDictionary(g => g.Key, g => g.Last());
     }
 
+    /// <summary>Every job, and every load of a job, the database has a photo for (the photo explorer's starting points).</summary>
+    public List<string> PhotoJobs()
+    {
+        using var db = Open();
+        return Rows(db, "SELECT DISTINCT job FROM photos WHERE deleted_at IS NULL", r => r.GetString(0));
+    }
+
+    public List<string> PhotoLoads(string job)
+    {
+        using var db = Open();
+        return Rows(db, "SELECT DISTINCT load_number FROM photos WHERE job = $job AND deleted_at IS NULL", r => r.GetString(0), ("$job", job));
+    }
+
     public List<PhotoMeta> RecentPhotos(string? deviceId, int limit)
     {
         using var db = Open();

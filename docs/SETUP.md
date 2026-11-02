@@ -310,6 +310,8 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | GET | `/api/activity?device=&job=&load=&mark=&before=&limit=` | History, newest first. `load` is the load id; `before` an activity id for paging; `limit` up to 500 (default 100). |
 | GET | `/api/docs/setup`, `/api/docs/photos` | This file and `PHOTOS.md`, as Markdown. |
 | | `/api/photos...` | See `PHOTOS.md`. |
+| | `/api/browse...` | The photo explorer, look only. **No key needed** unless `PHOTOS_PUBLIC` is `false`. See `PHOTOS.md`. |
+| DELETE | `/api/admin/photos/{job}/{load}/{name}` | Deletes a photo (admin code). See `PHOTOS.md`. |
 
 `{loadId}` is PowerFab's load id (`LoadID`), not the load number.
 

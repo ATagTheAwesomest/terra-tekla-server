@@ -29,6 +29,8 @@ public sealed class SettingsFile(string path, IConfiguration running)
         new("CLIENT_ROOT", "iPads & access", "iPad app folder", "path", true,
             "A git clone of terra-tekla-client (the folder with index.html)."),
         new("PHOTOS_ENABLED", "Photos", "Take photos from the iPads", "bool", true, "Off: the photo routes answer 403.", "false"),
+        new("PHOTOS_PUBLIC", "Photos", "Anyone can look through photos", "bool", true,
+            "On: the Photos explorer (app home screen and /api/browse) works without the access key, look only. Anyone with this server's address can then see the photos. Off: it needs the key.", "true"),
         new("PHOTOS_ROOT", "Photos", "Photo base folder", "path", true,
             "Full path. Jobs go in <this>\\{job} unless a folder rule says otherwise. Required when photos are on."),
         new("PHOTOS_MAX_MB", "Photos", "Largest photo (MB)", "number", true, "Largest single photo.", "25"),
