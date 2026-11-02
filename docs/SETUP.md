@@ -17,7 +17,8 @@ terra-tekla-server is the shop's own server for the TERRA iPad app (terra-tekla-
   (`deploy.ps1`, `update-client.ps1`).
 
 This file ships next to `TerraTeklaServer.exe` as `SETUP.md` and is shown on the admin page
-(Docs > Setup), so it always matches the running build. Photos have their own guide, `PHOTOS.md`.
+(Docs > Setup), so it always matches the running build. Photos have their own guide, `PHOTOS.md`,
+and printing through the server has `PRINTING.md`.
 
 ```
  iPad (TERRA app, Safari / home screen)          admin page (any browser)
@@ -27,6 +28,7 @@ This file ships next to `TerraTeklaServer.exe` as `SETUP.md` and is shown on the
    ├─ data\terra.db       SQLite: stacks, devices, history, truck checks, photo records
    ├─ CLIENT_ROOT         a git clone of terra-tekla-client, served as the app
    ├─ PHOTOS_ROOT         photo folders (PHOTOS.md)
+   ├─ data\printers.json  printers the iPads may print on (PRINTING.md)
    └─ /api/powerfab/* ──► tekla-conversion-layer (PowerFab REST converter, port 8090) ──► PowerFab
 ```
 
@@ -85,8 +87,9 @@ still asks the server for everything: key and code included.
   and the server's last warnings and errors. Updates every 10 seconds.
 - **Settings**: the settings above, grouped, with a Test button for the conversion layer's address;
   the **photo folder rules** (add, reorder, remove, try a job number, save: takes effect at once);
-  **Updates** (below); change the admin code; lock now; download a database backup; restart.
-- **Docs**: this guide and the photo guide.
+  **Printers** (scan the network, pick which ones the iPads may print on, test page; see
+  `PRINTING.md`); **Updates** (below); change the admin code; lock now; download a database backup; restart.
+- **Docs**: this guide, the photo guide and the printing guide.
 
 ### The admin code
 
@@ -178,6 +181,7 @@ address that got it.
 | `GET /api/admin/update` | Versions, whether updates can run here, the last app update's output, the last server update's log. |
 | `POST /api/admin/update/client` | Starts `update-client.ps1` (202; follow it with `GET /api/admin/update`). |
 | `POST /api/admin/update/server` | Starts `deploy.ps1` (202); the server restarts. |
+| `GET/PUT /api/admin/printers`, `POST /api/admin/printers/scan`, `/check`, `/{id}/test` | Printers; see `PRINTING.md`. |
 
 `GET /api/jobs/powerfab` (access key only) is the Jobs list.
 
@@ -308,10 +312,12 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | GET | `/api/loads/{loadId}?job=&number=` | One load's state. A load not seen before answers an empty state with one stack (not saved until changed). |
 | POST | `/api/loads/{loadId}/ops` | Apply one operation. Body: `{ "op", "opId", "job", "loadNumber", ...fields }`. Answers `{ state, changed }`. 400 with the reason if it can't be applied. |
 | GET | `/api/activity?device=&job=&load=&mark=&before=&limit=` | History, newest first. `load` is the load id; `before` an activity id for paging; `limit` up to 500 (default 100). |
-| GET | `/api/docs/setup`, `/api/docs/photos` | This file and `PHOTOS.md`, as Markdown. |
+| GET | `/api/docs/setup`, `/api/docs/photos`, `/api/docs/printing` | This file, `PHOTOS.md` and `PRINTING.md`, as Markdown. |
 | | `/api/photos...` | See `PHOTOS.md`. |
 | | `/api/browse...` | The photo explorer, look only. **No key needed** unless `PHOTOS_PUBLIC` is `false`. See `PHOTOS.md`. |
 | DELETE | `/api/admin/photos/{job}/{load}/{name}` | Deletes a photo (admin code). See `PHOTOS.md`. |
+| GET | `/api/printers` | The printers the iPads may print on. See `PRINTING.md`. |
+| POST | `/api/print`, `/api/print/pdf` | Prints a ticket on one of them / the ticket as a PDF. See `PRINTING.md`. |
 
 `{loadId}` is PowerFab's load id (`LoadID`), not the load number.
 
@@ -385,6 +391,7 @@ the socket with code 4401. Then the server sends:
 | `activity` | `items` | New history lines. |
 | `devices` | `devices` | A device was added, renamed, recoloured, came online or went offline. |
 | `photos` | `job`, `load` | A load's photos changed. |
+| `printers` | | The printers list was saved on the admin board. |
 | `pong` | `at` | Answer to `{ "type": "ping" }`. |
 
 The app reconnects by itself (backing off up to 30 seconds) and, on reconnect, sends anything waiting
@@ -395,7 +402,7 @@ and re-reads the open load.
 `scan`, `refused`, `unload`, `sync-remove` (a piece PowerFab no longer has on the load),
 `auto-stack` (a piece loaded in PowerFab itself), `move`, `stack-add`, `stack-rename`,
 `stack-delete`, `check`, `check-undo`, `check-reset`, `check-complete`, `ship`, `unship`, `return`,
-`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`.
+`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`, `print`.
 
 ## Database
 
@@ -454,3 +461,5 @@ job `EPM-001`. `node tools/fake-powerfab.mjs <port> <key>` changes the fake's po
    page's dot is green).
 7. Each iPad opens the HTTPS address, has the access key, a name and colour, and is on the home screen.
 8. Two iPads on the same load: a scan on one shows on the other within a second.
+9. Printing (optional): admin board › Settings › Printers: scan, add, tick iPads, save, Test page;
+   then an iPad's Print shipping ticket lists the printer and prints on it (`PRINTING.md`).
