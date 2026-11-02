@@ -12,8 +12,24 @@ if (-not (Test-Path $settingsFile)) {
     throw "Create local.settings.json first (copy local.settings.example.json and fill in ACCESS_KEY, CONVERSION_URL, CONVERSION_KEY and CLIENT_ROOT)."
 }
 
+function Stop-TerraService([string]$Name, [int]$Seconds = 30) {
+    # Stop-Service waits forever if the process doesn't exit; ask, wait, then end the process.
+    $svc = Get-Service $Name -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -eq 'Stopped') { return }
+    Stop-Service $Name -NoWait -ErrorAction SilentlyContinue
+    try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds($Seconds)) }
+    catch {
+        $id = (Get-CimInstance Win32_Service -Filter "Name='$Name'").ProcessId
+        if ($id) {
+            Write-Warning "$Name didn't stop within $Seconds s; ending its process ($id)."
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    }
+}
+
 if (Get-Service $name -ErrorAction SilentlyContinue) {
-    Stop-Service $name -ErrorAction SilentlyContinue
+    Stop-TerraService $name
     sc.exe delete $name | Out-Null
     Start-Sleep 2
 }

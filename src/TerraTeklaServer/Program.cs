@@ -16,6 +16,8 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot"),
 });
 builder.Host.UseWindowsService(o => o.ServiceName = "TerraTeklaServer");
+// A stop (deploy, restart) waits at most this long for open requests before cutting them off.
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(10));
 // Same keys as the environment variables in docs/SETUP.md. The Windows service reads this file, and
 // the admin page's Settings write to it (SETTINGS_FILE only moves it, for tests).
 var settingsPath = builder.Configuration["SETTINGS_FILE"] is { Length: > 0 } custom
@@ -112,7 +114,10 @@ app.Map("/ws", async (HttpContext http) =>
     if (!http.WebSockets.IsWebSocketRequest)
         return Results.BadRequest("WebSocket only.");
     var socket = await http.WebSockets.AcceptWebSocketAsync();
-    var hello = await ReadHelloAsync(socket, http.RequestAborted);
+    // Live connections stay open for hours; end them as soon as the service is asked to stop,
+    // or the stop waits on every connected iPad.
+    using var stop = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, app.Lifetime.ApplicationStopping);
+    var hello = await ReadHelloAsync(socket, stop.Token);
     if (hello is null || !KeyOk(LoadOps.Str(hello, "key")))
     {
         await socket.CloseAsync((WebSocketCloseStatus)4401, "The access key was refused.", CancellationToken.None);
@@ -123,7 +128,7 @@ app.Map("/ws", async (HttpContext http) =>
     Device? device = null;
     if (deviceId is not null)
         device = store.Touch(deviceId, http.Connection.RemoteIpAddress?.ToString(), http.Request.Headers.UserAgent, LoadOps.Str(hello, "version")).Device;
-    await hub.RunAsync(socket, deviceId, kind, new { type = "welcome", device, devices = DeviceList(), serverVersion = version, photosEnabled = settings.Photos.Enabled }, http.RequestAborted);
+    await hub.RunAsync(socket, deviceId, kind, new { type = "welcome", device, devices = DeviceList(), serverVersion = version, photosEnabled = settings.Photos.Enabled }, stop.Token);
     return Results.Empty;
 });
 

@@ -63,6 +63,21 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 
 function Step($text) { Write-Host ''; Write-Host "== $text" -ForegroundColor Cyan }
 function Info($text) { Write-Host "   $text" }
+function Stop-TerraService([string]$Name, [int]$Seconds = 30) {
+    # Stop-Service waits forever if the process doesn't exit; ask, wait, then end the process.
+    $svc = Get-Service $Name -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -eq 'Stopped') { return }
+    Stop-Service $Name -NoWait -ErrorAction SilentlyContinue
+    try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds($Seconds)) }
+    catch {
+        $id = (Get-CimInstance Win32_Service -Filter "Name='$Name'").ProcessId
+        if ($id) {
+            Write-Warning "$Name didn't stop within $Seconds s; ending its process ($id)."
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    }
+}
 function Good($text) { Write-Host "   OK  $text" -ForegroundColor Green }
 function Warn($text) { Write-Host "   !!  $text" -ForegroundColor Yellow }
 function Todo($text) { $todo.Add($text); Write-Host "   TODO $text" -ForegroundColor Yellow }
@@ -173,8 +188,7 @@ $db = Join-Path $InstallDir 'data\terra.db'
 if (Test-Path $db) {
     # Copy the database with the service stopped so the copy is whole; deploy starts it again.
     if ($newService -and $newService.Status -eq 'Running') {
-        Stop-Service $ServiceName
-        (Get-Service $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        Stop-TerraService $ServiceName
     }
     Get-ChildItem (Join-Path $InstallDir 'data') -Filter 'terra.db*' | ForEach-Object { Copy-Item $_.FullName $backup -Force }
     Info "backed up the database ($db)"
