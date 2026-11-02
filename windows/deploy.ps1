@@ -23,10 +23,20 @@ $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
 # Find git even when it isn't on PATH (Git for Windows default install location).
 $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 if (-not $git -and (Test-Path 'C:\Program Files\Git\cmd\git.exe')) { $git = 'C:\Program Files\Git\cmd\git.exe' }
+# Runs git. Git writes progress ("From https://...") to stderr; when this script's output is captured
+# (the admin page's Update server does), Windows PowerShell turns those lines into errors, which
+# $ErrorActionPreference = 'Stop' then treats as a failure. So they are passed on as plain text,
+# and only git's exit code ($LASTEXITCODE) says whether it worked.
+function Invoke-Git {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $git @args 2>&1 | ForEach-Object { "$_" } }
+    finally { $ErrorActionPreference = $previous }
+}
 
 # 0. Pull the latest code. Fast-forward only, so a diverged branch stops here instead of merging silently.
 if ($git -and -not $SkipPull) {
-    & $git -c safe.directory=* -C $repo pull --ff-only
+    Invoke-Git -c safe.directory=* -C $repo pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw 'git pull failed (local changes or diverged branch). Nothing was deployed.' }
 }
 
@@ -42,8 +52,8 @@ if (-not $SkipPull -and -not $SkipClient) {
 $commit = 'unknown commit'
 $dirty = ''
 if ($git) {
-    $commit = & $git -c safe.directory=* -C $repo rev-parse --short HEAD
-    $dirty = & $git -c safe.directory=* -C $repo status --porcelain
+    $commit = Invoke-Git -c safe.directory=* -C $repo rev-parse --short HEAD
+    $dirty = Invoke-Git -c safe.directory=* -C $repo status --porcelain
 }
 Write-Host "Building $commit$(if ($dirty) { ' (uncommitted changes present)' })"
 

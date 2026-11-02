@@ -37,6 +37,16 @@ Write-Host "iPad app folder: $ClientRoot (now $(if ($before) { "v$before" } else
 # Find git even when it isn't on PATH (Git for Windows default install location).
 $git = (Get-Command git -ErrorAction SilentlyContinue).Source
 if (-not $git -and (Test-Path 'C:\Program Files\Git\cmd\git.exe')) { $git = 'C:\Program Files\Git\cmd\git.exe' }
+# Runs git. Git writes progress ("From https://...") to stderr; when this script's output is captured
+# (the admin page's Update server does), Windows PowerShell turns those lines into errors, which
+# $ErrorActionPreference = 'Stop' then treats as a failure. So they are passed on as plain text,
+# and only git's exit code ($LASTEXITCODE) says whether it worked.
+function Invoke-Git {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $git @args 2>&1 | ForEach-Object { "$_" } }
+    finally { $ErrorActionPreference = $previous }
+}
 # The service runs as another Windows user than the one who cloned the folder; git refuses such a
 # folder ("dubious ownership") unless told it is fine.
 $safe = @('-c', 'safe.directory=*')
@@ -45,12 +55,12 @@ $isClone = Test-Path (Join-Path $ClientRoot '.git')
 $isEmpty = -not (Test-Path $ClientRoot) -or -not (Get-ChildItem $ClientRoot -Force)
 
 if ($git -and $isClone) {
-    & $git @safe -C $ClientRoot pull --ff-only
+    Invoke-Git @safe -C $ClientRoot pull --ff-only
     if ($LASTEXITCODE -ne 0) { throw "git pull in $ClientRoot failed (local changes, a diverged branch, or no access to the repo). The app keeps the version it had." }
-    Write-Host "Now at $(& $git @safe -C $ClientRoot log -1 --format='%h %s')"
+    Write-Host "Now at $(Invoke-Git @safe -C $ClientRoot log -1 --format='%h %s')"
 }
 elseif ($git -and $isEmpty) {
-    & $git @safe clone --branch $Branch $RepoUrl $ClientRoot
+    Invoke-Git @safe clone --branch $Branch $RepoUrl $ClientRoot
     if ($LASTEXITCODE -ne 0) { throw "git clone of $RepoUrl failed (no access to the repo?)." }
 }
 else {
