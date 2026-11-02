@@ -47,16 +47,29 @@ if ($git) {
 }
 Write-Host "Building $commit$(if ($dirty) { ' (uncommitted changes present)' })"
 
+function Stop-TerraService([string]$Name, [int]$Seconds = 30) {
+    # Stop-Service waits forever if the process doesn't exit; ask, wait, then end the process.
+    $svc = Get-Service $Name -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -eq 'Stopped') { return }
+    Stop-Service $Name -NoWait -ErrorAction SilentlyContinue
+    try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds($Seconds)) }
+    catch {
+        $id = (Get-CimInstance Win32_Service -Filter "Name='$Name'").ProcessId
+        if ($id) {
+            Write-Warning "$Name didn't stop within $Seconds s; ending its process ($id)."
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    }
+}
+
 # 1. Build and publish from the repo.
 if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
 dotnet publish $project -c Release -o $publishDir
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed; service left running on the previous build." }
 
 # 2. Stop the service so its files can be replaced.
-if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
-    Stop-Service $ServiceName -ErrorAction SilentlyContinue
-    (Get-Service $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-}
+Stop-TerraService $ServiceName
 
 # 3. Copy the build over the install folder, leaving the settings, rules and database alone.
 robocopy $publishDir $InstallDir /E /XF local.settings.json photo-rules.json /XD data /NFL /NDL /NJH /NJS | Out-Null
