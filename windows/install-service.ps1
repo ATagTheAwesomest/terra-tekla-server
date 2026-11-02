@@ -48,9 +48,9 @@ if (-not (Get-NetFirewallRule -DisplayName 'TERRA Server' -ErrorAction SilentlyC
 Start-Service $name
 Start-Sleep 3
 $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
-# The admin code the server made up the first time it started, until it is changed on the admin board.
+# The admin code in use (the server writes it there whenever it is made up or changed).
 $dataDir = if ($settings.DATA_DIR) { $settings.DATA_DIR } else { 'data' }
 if (-not [IO.Path]::IsPathRooted($dataDir)) { $dataDir = Join-Path $dir $dataDir }
 $codeFile = Join-Path $dataDir 'admin-code.txt'
-if (Test-Path $codeFile) { Write-Host "Admin code (until you change it on the admin board): $((Get-Content $codeFile -TotalCount 1).Trim())" }
+if (Test-Path $codeFile) { Write-Host "Admin code (also in $codeFile): $((Get-Content $codeFile -TotalCount 1).Trim())" }
 Write-Host "Service started. Open http://<this computer>:$port/admin/ in a browser, or check: Invoke-RestMethod http://127.0.0.1:$port/health"

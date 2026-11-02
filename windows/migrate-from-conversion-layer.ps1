@@ -431,7 +431,7 @@ Write-Host '   Then, on each iPad:' -ForegroundColor Cyan
 $where = if ($PublicHostname) { "https://$($PublicHostname -replace '^https?://', '' -replace '/.*$', '')/" } else { 'https://<your hostname>/' }
 Info "1. Safari > $where > Server settings / Admin > leave Server address blank, enter the key (or the setup code) > Save."
 Info '2. Share > Add to Home Screen. 3. Delete the old GitHub Pages TERRA icon. 4. Rename it on the admin board (Devices).'
-Info "Admin board: $($where)admin/ (Add to Home Screen / Install app the same way). Admin code: in $InstallDir\data\admin-code.txt until you change it."
+Info "Admin board: $($where)admin/ (Add to Home Screen / Install app the same way). Admin code: in $InstallDir\data\admin-code.txt (kept up to date when you change it)."
 if ($todo.Count) {
     Write-Host ''
     Write-Host '   Still to do by hand:' -ForegroundColor Yellow

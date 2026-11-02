@@ -241,3 +241,11 @@ tr.not-pf td:first-child b { color: var(--muted); }
 .setup-qr svg { display: block; width: min(320px, 100%); height: auto; background: #fff; border-radius: 8px; }
 .setup-qr .setup-text { display: block; overflow-wrap: anywhere; margin-top: 6px; }
 .device-user { font-size: 0.8rem; color: var(--muted, #a6a6a6); font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+/* Docs: jump-to contents */
+.doc-toc { max-width: 900px; }
+.doc-toc h2 { margin: 0 0 .5rem; font-size: 1rem; }
+.doc-toc ul { list-style: none; margin: 0; padding: 0; columns: 2 16rem; column-gap: 2rem; }
+.doc-toc li { break-inside: avoid; padding: .2rem 0; }
+.doc-toc li.toc-3 { padding-left: 1rem; font-size: .92em; }
+.doc :is(h2, h3) { scroll-margin-top: 4.5rem; }

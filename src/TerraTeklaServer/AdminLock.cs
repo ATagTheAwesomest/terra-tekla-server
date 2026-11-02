@@ -9,8 +9,9 @@ public sealed class BadPinException(string message) : Exception(message);
 /// <summary>
 /// The admin code that locks the admin page's Server (stats) and Settings. The code is 4 to 8 digits,
 /// kept only as a salted PBKDF2 hash (<c>ADMIN_PIN_HASH</c> in local.settings.json). The server makes
-/// up the first one itself (<see cref="EnsureCode"/>) and leaves it in DATA_DIR\admin-code.txt until
-/// it is changed, so nobody who merely reaches the server can pick it. Entering it gives
+/// up the first one itself (<see cref="EnsureCode"/>), so nobody who merely reaches the server can pick
+/// it. The current code is also written to DATA_DIR\admin-code.txt (made up or changed), for whoever
+/// runs the server. Entering it gives
 /// the device a random token (header <c>X-Terra-Admin</c>) that is good for <c>ADMIN_LOCK_MINUTES</c>
 /// (30 by default) from the IP address that entered the code, and no other. The iPad app and the
 /// admin page share it, since they come from the same server. Wrong codes lock everyone out for a
@@ -27,9 +28,9 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
     string? hash = (file.Read().TryGetValue("ADMIN_PIN_HASH", out var h) ? h : null) is { Length: > 0 } stored ? stored : null;
     int failures;
     DateTime blockedUntil = DateTime.MinValue;
-    string? codeFile; // DATA_DIR\admin-code.txt while it holds the code the server made up
+    string? codeFile; // DATA_DIR\admin-code.txt: the current code, for whoever runs the server
 
-    /// <summary>Where the made-up code is written; deleted as soon as the code is changed.</summary>
+    /// <summary>Where the current code is written, each time it is made up or changed.</summary>
     public static string CodeFilePath(string dataDir) => Path.Combine(dataDir, "admin-code.txt");
 
     public bool PinSet
@@ -59,20 +60,18 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
             if (hash is not null)
                 return null;
             var code = NewCode();
-            Save(Hash(code));
-            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            File.WriteAllText(file, $"{code}\r\n\r\nThe TERRA server's admin code, made up by the server on {DateTime.Now:yyyy-MM-dd HH:mm}.\r\n"
-                + "Change it on the admin board (Settings > Admin code); this file is deleted then.\r\n");
+            Save(code, "made up by the server");
             log.LogWarning("No admin code was set, so the server made one up. It is in {File}.", file);
             return code;
         }
     }
 
-    /// <summary>A new random code in place of the current one (which is needed). Every other session is locked out.</summary>
-    public (string Code, string Token, DateTime Until)? Generate(string current, string ip)
+    /// <summary>A new random code in place of the current one. Every other session is locked out.</summary>
+    public (string Code, string Token, DateTime Until) Generate(string ip)
     {
         var code = NewCode();
-        return Change(current, code, ip) is { } session ? (code, session.Token, session.Until) : null;
+        var session = Change(code, ip);
+        return (code, session.Token, session.Until);
     }
 
     static string NewCode() => RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
@@ -85,7 +84,7 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
         {
             if (hash is not null)
                 throw new InvalidOperationException("An admin code is already set. Change it from Settings, with the current code.");
-            Save(Hash(pin));
+            Save(pin, $"set from {ip}");
             log.LogWarning("The admin code was set for the first time (from {Ip}).", ip);
             return NewSession(ip);
         }
@@ -115,15 +114,16 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
         }
     }
 
-    /// <summary>Changes the code (the current one is needed). Every other session is locked out.</summary>
-    public (string Token, DateTime Until)? Change(string current, string pin, string ip)
+    /// <summary>
+    /// Changes the code. Only for a device that is unlocked already (the route sits behind the admin
+    /// code), so the current code isn't asked again. Every other session is locked out.
+    /// </summary>
+    public (string Token, DateTime Until) Change(string pin, string ip)
     {
         Check(pin);
         lock (gate)
         {
-            if (Unlock(current, ip) is null)
-                return null;
-            Save(Hash(pin));
+            Save(pin, $"changed from {ip}");
             sessions.Clear();
             log.LogWarning("The admin code was changed (from {Ip}).", ip);
             return NewSession(ip);
@@ -187,14 +187,23 @@ public sealed class AdminLock(SettingsFile file, ILogger<AdminLock> log)
         }
     }
 
-    void Save(string newHash)
+    void Save(string code, string how)
     {
-        var first = hash is null;
+        var newHash = Hash(code);
         file.Write(new Dictionary<string, string?> { ["ADMIN_PIN_HASH"] = newHash });
         hash = newHash;
-        // A changed code: the made-up one written down at startup is no good any more.
-        if (!first && codeFile is not null)
-            try { File.Delete(codeFile); } catch (IOException) { }
+        if (codeFile is null)
+            return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(codeFile)!);
+            File.WriteAllText(codeFile, $"{code}\r\n\r\nThe TERRA server's admin code, {how} on {DateTime.Now:yyyy-MM-dd HH:mm}.\r\n"
+                + "Change it on the admin board (Settings > Admin code); this file follows.\r\n");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            log.LogWarning(ex, "Couldn't write the admin code to {File}.", codeFile);
+        }
     }
 
     (string, DateTime) NewSession(string ip)

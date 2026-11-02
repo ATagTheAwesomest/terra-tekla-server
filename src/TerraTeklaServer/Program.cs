@@ -301,12 +301,9 @@ var admin = api.MapGroup("/admin").AddEndpointFilter(async (context, next) =>
 
 admin.MapPut("/pin", (PinChange body, HttpContext http) =>
 {
-    if (adminLock.RetryAfter is > 0 and var wait)
-        return TooManyTries(wait);
     try
     {
-        if (adminLock.Change(body.Current ?? "", body.Pin ?? "", AdminLock.ClientIp(http)) is not { } session)
-            return Results.Problem("The current code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
+        var session = adminLock.Change(body.Pin ?? "", AdminLock.ClientIp(http));
         store.Log(Me(http) ?? AdminDevice, "admin", "Changed the admin code");
         return Results.Json(new { token = session.Token, until = session.Until });
     }
@@ -316,12 +313,9 @@ admin.MapPut("/pin", (PinChange body, HttpContext http) =>
     }
 });
 // A new random code (shown once), in place of the current one.
-admin.MapPost("/pin/generate", (PinRequest body, HttpContext http) =>
+admin.MapPost("/pin/generate", (HttpContext http) =>
 {
-    if (adminLock.RetryAfter is > 0 and var wait)
-        return TooManyTries(wait);
-    if (adminLock.Generate(body.Pin ?? "", AdminLock.ClientIp(http)) is not { } made)
-        return Results.Problem("The current code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
+    var made = adminLock.Generate(AdminLock.ClientIp(http));
     store.Log(Me(http) ?? AdminDevice, "admin", "Made a new admin code");
     return Results.Json(new { code = made.Code, token = made.Token, until = made.Until });
 });
