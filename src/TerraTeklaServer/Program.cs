@@ -57,6 +57,9 @@ if (settings.ConversionUrl == "")
 if (settings.ClientRoot == "" || !File.Exists(Path.Combine(settings.ClientRoot, "index.html")))
     app.Logger.LogWarning("CLIENT_ROOT ({Root}) has no index.html: the iPad app isn't being served.", settings.ClientRoot);
 
+if (adminLock.EnsureCode(AdminLock.CodeFilePath(settings.DataDir)) is not null)
+    app.Logger.LogWarning("Admin code: see {File}.", AdminLock.CodeFilePath(settings.DataDir));
+
 hub.Changed += () => hub.Broadcast(new { type = "devices", devices = DeviceList() });
 // Tell every iPad a new app is on the server, so it can offer to reload.
 updater.ClientUpdated += v => hub.Broadcast(new { type = "client-updated", version = v });
@@ -202,13 +205,10 @@ api.MapGet("/jobs/powerfab", async (IHttpClientFactory factory, CancellationToke
     return Results.Json(new { ok = error is null, error, fetchedAt = DateTime.UtcNow, photosEnabled = settings.Photos.Enabled, jobs = rows });
 });
 
-// This device: who it is (made the first time it is seen) and renaming it.
+// This device: who it is (made the first time it is seen, as "User N"). Its name and colour are set
+// on the admin board only (PUT /api/admin/devices/{id}), never by the device itself.
 api.MapGet("/me", (HttpContext http) => Results.Json(Me(http, required: true)));
-api.MapPut("/me", (HttpContext http, DeviceUpdate update) =>
-{
-    var me = Me(http, required: true)!;
-    return DeviceChange(me.Id, update, me);
-});
+api.MapPut("/me", () => Results.Problem("An iPad's name and colour are set on the admin board.", statusCode: 403));
 
 // A quick "is everything up" for the admin page's front page. The details (folders, database, load,
 // errors) are in /api/admin/stats, behind the admin code.
@@ -223,8 +223,6 @@ api.MapGet("/status", async (IHttpClientFactory http) => new
 });
 
 api.MapGet("/devices", () => DeviceList());
-api.MapPut("/devices/{id}", (string id, DeviceUpdate update, HttpContext http) =>
-    DeviceChange(id, update, Me(http) ?? AdminDevice));
 
 api.MapGet("/jobs", () => store.Jobs().Select(j => new { job = j.Job, loads = j.Loads, pieces = j.Pieces, lastAt = j.LastAt }));
 api.MapGet("/jobs/{job}/loads", async (string job) => await store.ForJobAsync(job));
@@ -274,24 +272,6 @@ adminOpen.MapGet("/lock", (HttpContext http) => new
     lockMinutes = (int)adminLock.Duration.TotalMinutes,
     retryAfter = adminLock.RetryAfter,
 });
-// The first code, while none is set. After that it can only be changed with the current one.
-adminOpen.MapPost("/setup", (PinRequest body, HttpContext http) =>
-{
-    try
-    {
-        var (token, until) = adminLock.Setup(body.Pin ?? "", AdminLock.ClientIp(http));
-        store.Log(Me(http) ?? AdminDevice, "admin", "Set the admin code");
-        return Results.Json(new { token, until });
-    }
-    catch (BadPinException ex)
-    {
-        return Results.Problem(ex.Message, statusCode: 400);
-    }
-    catch (InvalidOperationException ex)
-    {
-        return Results.Problem(ex.Message, statusCode: 409);
-    }
-});
 adminOpen.MapPost("/unlock", (PinRequest body, HttpContext http) =>
 {
     if (!adminLock.PinSet)
@@ -311,7 +291,7 @@ adminOpen.MapPost("/lock", (HttpContext http) =>
 var admin = api.MapGroup("/admin").AddEndpointFilter(async (context, next) =>
     adminLock.Valid(AdminToken(context.HttpContext), AdminLock.ClientIp(context.HttpContext))
         ? await next(context)
-        : Results.Problem(adminLock.PinSet ? "Locked: enter the admin code." : "Set an admin code first.", statusCode: 403,
+        : Results.Problem("Locked: enter the admin code.", statusCode: 403,
             extensions: new Dictionary<string, object?> { ["locked"] = true, ["pinSet"] = adminLock.PinSet }));
 
 admin.MapPut("/pin", (PinChange body, HttpContext http) =>
@@ -330,6 +310,20 @@ admin.MapPut("/pin", (PinChange body, HttpContext http) =>
         return Results.Problem(ex.Message, statusCode: 400);
     }
 });
+// A new random code (shown once), in place of the current one.
+admin.MapPost("/pin/generate", (PinRequest body, HttpContext http) =>
+{
+    if (adminLock.RetryAfter is > 0 and var wait)
+        return TooManyTries(wait);
+    if (adminLock.Generate(body.Pin ?? "", AdminLock.ClientIp(http)) is not { } made)
+        return Results.Problem("The current code is wrong.", statusCode: 403, extensions: new Dictionary<string, object?> { ["wrongPin"] = true });
+    store.Log(Me(http) ?? AdminDevice, "admin", "Made a new admin code");
+    return Results.Json(new { code = made.Code, token = made.Token, until = made.Until });
+});
+
+// Renaming and recolouring an iPad: the admin board only.
+admin.MapPut("/devices/{id}", (string id, DeviceUpdate update, HttpContext http) =>
+    DeviceChange(id, update, Me(http) ?? AdminDevice));
 
 admin.MapGet("/settings", () => SettingsView());
 admin.MapPut("/settings", (Dictionary<string, string?> changes) =>
@@ -636,7 +630,7 @@ object[] DeviceList()
     var online = hub.Online();
     return store.Devices().Select(d => (object)new
     {
-        d.Id, d.Name, d.Color, d.CreatedAt, d.LastSeenAt, d.LastIp, d.UserAgent, d.AppVersion,
+        d.Id, d.Number, d.User, d.Name, d.Color, d.CreatedAt, d.LastSeenAt, d.LastIp, d.UserAgent, d.AppVersion,
         online = online.ContainsKey(d.Id),
         onlineSince = online.TryGetValue(d.Id, out var since) ? since : (DateTime?)null,
     }).ToArray();
@@ -880,7 +874,7 @@ static Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider ClientC
 public partial class Program
 {
     /// <summary>The admin page's changes are made as this pseudo device (it has no X-Terra-Device).</summary>
-    static readonly Device AdminDevice = new("admin", "Admin page", "#9a9a9a", "", "", null, null, null);
+    static readonly Device AdminDevice = new("admin", "Admin page", "#9a9a9a", "", "", null, null, null, 0);
 }
 
 public sealed record DeviceUpdate(string? Name, string? Color);

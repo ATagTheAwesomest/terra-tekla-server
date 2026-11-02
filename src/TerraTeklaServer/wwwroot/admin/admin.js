@@ -280,6 +280,7 @@ function deviceCard(d) {
   return `<a class="device${d.online ? ' online' : ''}" style="--c:${esc(d.color)}" href="#/device/${enc(d.id)}">
     <span class="dot" title="${d.online ? 'Connected' : 'Not connected'}"></span>
     <span class="device-name">${esc(d.name)}</span>
+    ${d.user && d.user !== d.name ? `<span class="device-user">${esc(d.user)}</span>` : ''}
     <span class="muted">${d.online ? 'Connected' : `Seen ${esc(ago(d.lastSeenAt))}`}</span>
     <span class="device-meta">${d.appVersion ? `App v${esc(d.appVersion)} · ` : ''}${esc(d.lastIp ?? '')}</span>
   </a>`;
@@ -297,7 +298,7 @@ function healthList() {
     <dt>iPad app</dt><dd>${health.client.served ? `v${esc(health.client.version ?? '?')}` : '<span class="error">Not served: the iPad app folder (CLIENT_ROOT) has no index.html</span>'}</dd>
     <dt>PowerFab bridge</dt><dd>${c?.ok ? `Reachable (${num(c.ms)} ms) · ${esc(c.health?.mode ?? '')} mode · writes ${c.health?.writesEnabled ? 'on' : '<span class="error">off</span>'}` : `<span class="error">${esc(c?.error ?? 'Unreachable')}</span>`}</dd>
     <dt>Photos</dt><dd>${health.photosEnabled ? 'On' : 'Off'}</dd>
-    <dt>Admin code</dt><dd>${health.adminPinSet ? 'Set' : '<span class="warn-text">Not set yet:</span> <a href="#/settings">set one</a> to lock Server and Settings'}</dd>
+    <dt>Admin code</dt><dd>Set</dd>
   </dl>
   <p><a href="#/server">Full server stats and health ›</a></p>`;
 }
@@ -315,9 +316,10 @@ async function pageDevice(id) {
     <div>
       <section class="panel" style="border-left:6px solid ${esc(d.color)}">
         <h1>${esc(d.name)}</h1>
+        <p class="muted"><b>${esc(d.user ?? '')}</b>: this iPad’s fixed number, kept for good whatever its name.</p>
         <p class="muted">${d.online ? 'Connected now' : `Last seen ${esc(ago(d.lastSeenAt))}`} · first seen ${esc(when(d.createdAt))}${d.appVersion ? ` · app v${esc(d.appVersion)}` : ''}</p>
         <form class="edit" id="form-device" data-id="${esc(id)}">
-          <label for="device-name">Name (shown on every iPad and on their scans and photos)</label>
+          <label for="device-name">Name (shown on every iPad and on their scans and photos; only changed here, with the admin code)</label>
           <input id="device-name" type="text" maxlength="40" value="${esc(d.name)}">
           <button class="btn primary" type="submit">Save</button>
           <label>Colour</label>
@@ -484,32 +486,15 @@ function openPinPad({ title = 'Admin code', note = '', error = '', okLabel = 'Un
   });
 }
 
-// First visit: make a code (twice). After that: enter it. Resolves true once unlocked.
+// Asks for the admin code. Resolves true once unlocked. The server makes up the first code itself
+// (DATA_DIR\\admin-code.txt on the server) so nobody who merely reaches it can pick one.
 async function unlock() {
   let lock;
   try { lock = await api('/admin/lock'); } catch (err) { return false; }
   if (lock.unlocked) { drawLockButton(); return true; }
-  if (!lock.pinSet) {
-    let error = '';
-    for (;;) {
-      const first = await openPinPad({ title: 'Set an admin code', note: 'No admin code is set yet. Pick 4 to 8 digits: it will be needed to open the admin board and change server settings, here and on the iPads.', error, okLabel: 'Next' });
-      if (first === null) return false;
-      const again = await openPinPad({ title: 'Enter it again', note: 'The same code, to be sure.', okLabel: 'Set code' });
-      if (again === null) return false;
-      if (first !== again) { error = 'The two codes didn’t match. Start again.'; continue; }
-      try {
-        const r = await api('/admin/setup', { method: 'POST', body: { pin: first } });
-        setAdminToken(r.token, r.until);
-        return true;
-      } catch (err) {
-        error = err.message;
-        if (err.status === 409) return unlock();
-      }
-    }
-  }
   let error = lock.retryAfter ? `Too many wrong codes. Try again in ${lock.retryAfter} s.` : '';
   for (;;) {
-    const pin = await openPinPad({ title: 'Admin code', note: 'The admin board is locked. It stays open on this device for 30 minutes after the code.', error });
+    const pin = await openPinPad({ title: 'Admin code', note: 'The admin board is locked. It stays open on this device for 30 minutes after the code. First time? The server made one up: it is in data\\admin-code.txt in the server’s install folder.', error });
     if (pin === null) return false;
     try {
       const r = await api('/admin/unlock', { method: 'POST', body: { pin } });
@@ -743,8 +728,14 @@ async function pageSettings() {
       ${rulesEditor(rules)}
       <section class="panel">
         <h2>Admin code</h2>
-        <p class="muted">Locks Server and Settings on this page. It is kept on the server only as a hash. Forgot it? Remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> on the server and restart; the next visit asks for a new one.</p>
-        <div class="form-foot"><button class="btn" type="button" data-change-pin>Change the code</button><button class="btn" type="button" data-lock-now>Lock now</button><span class="muted" id="pin-saved"></span></div>
+        <p class="muted">Locks this board and the admin part of the iPads’ Server settings. It is kept on the server only as a hash. <b>Make a new code</b> picks 6 random digits and shows them once; <b>Choose a code</b> lets you type one. Either needs the current code and locks every other device out. Forgot it? On the server, remove <code>ADMIN_PIN_HASH</code> from <code>${esc(view.file)}</code> and restart: the server makes a new one and writes it to <code>${esc(view.dataDir)}\\admin-code.txt</code>.</p>
+        <div class="form-foot"><button class="btn primary" type="button" data-generate-pin>Make a new code</button><button class="btn" type="button" data-change-pin>Choose a code</button><button class="btn" type="button" data-lock-now>Lock now</button><span class="muted" id="pin-saved"></span></div>
+        <div class="new-code" id="new-code" hidden></div>
+      </section>
+      <section class="panel">
+        <h2>Set up an iPad</h2>
+        <p class="muted">On the iPad: open this site in Safari, then Server settings / Admin › Scan QR with camera (or scan this with the barcode scanner into the setup code box). It holds this server’s address and the access key, so don’t share a photo of it.</p>
+        <div class="setup-qr" id="setup-qr"><button class="btn" type="button" data-show-qr>Show setup QR code</button></div>
       </section>
       <section class="panel" id="updates">${updatesPanel(updates)}</section>
       <section class="panel">
@@ -868,6 +859,56 @@ async function waitForServer(limit, expectDown) {
   setAdminToken(''); // sessions don't survive a restart
   location.hash = '#/settings';
   location.reload();
+}
+
+// A new random code from the server, shown once.
+async function generatePin() {
+  let error = '';
+  for (;;) {
+    const current = await openPinPad({ title: 'Current code', note: 'Enter the code in use now. The server then makes up a new one.', error, okLabel: 'Make new code' });
+    if (current === null) return;
+    try {
+      const r = await api('/admin/pin/generate', { method: 'POST', body: { pin: current } });
+      setAdminToken(r.token, r.until);
+      const box = $('#new-code');
+      box.innerHTML = `<p>The new admin code:</p><p class="code">${esc(r.code)}</p><p class="muted">Write it down now: it isn’t shown again. Other devices have to enter it.</p>`;
+      box.hidden = false;
+      $('#pin-saved').textContent = '';
+      return;
+    } catch (err) {
+      if (err.problem?.locked) { draw(); return; }
+      error = err.message;
+    }
+  }
+}
+
+// The iPads' setup code (as their Server settings read it): this server's address and the key.
+function setupCode() {
+  const json = JSON.stringify({ u: location.origin, k: key() });
+  const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(json)));
+  return `TERRACFG:${b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
+}
+
+async function showSetupQr() {
+  const box = $('#setup-qr');
+  if (!self.qrcode) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'vendor/qrcode.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Couldn’t load the QR maker.'));
+      document.head.appendChild(s);
+    }).catch((err) => { box.textContent = err.message; });
+    if (!self.qrcode) return;
+  }
+  const code = setupCode();
+  const qr = self.qrcode(0, 'M');
+  qr.addData(code);
+  qr.make();
+  box.innerHTML = `${qr.createSvgTag({ cellSize: 6, margin: 4, scalable: true })}
+    <p class="muted">Address: <code>${esc(location.origin)}</code></p>
+    <details><summary>Setup code as text</summary><code class="setup-text">${esc(code)}</code></details>
+    <button class="btn" type="button" data-hide-qr>Hide</button>`;
 }
 
 async function changePin() {
@@ -1027,9 +1068,11 @@ function connect() {
 
 // ---- Wiring ---------------------------------------------------------------------------
 
+// Behind the admin code: asks for it first when this device is locked.
 async function saveDevice(form, changes) {
   try {
-    await api(`/devices/${enc(form.dataset.id)}`, { method: 'PUT', body: changes });
+    if (!adminToken() && !(await unlock())) { $('#device-saved').textContent = 'Not saved: renaming needs the admin code.'; return; }
+    await api(`/admin/devices/${enc(form.dataset.id)}`, { method: 'PUT', body: changes });
     devices = await api('/devices');
     $('#device-saved').textContent = 'Saved. Every iPad shows the change now.';
     draw();
@@ -1074,6 +1117,9 @@ function bind() {
     if (t.closest('[data-restart]')) { restartServer(); return; }
     if (t.closest('[data-update]')) { startUpdate(t.closest('[data-update]').dataset.update); return; }
     if (t.closest('[data-change-pin]')) { changePin(); return; }
+    if (t.closest('[data-generate-pin]')) { generatePin(); return; }
+    if (t.closest('[data-show-qr]')) { showSetupQr(); return; }
+    if (t.closest('[data-hide-qr]')) { $('#setup-qr').innerHTML = '<button class="btn" type="button" data-show-qr>Show setup QR code</button>'; return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }
     if (t.closest('[data-download]')) {
       // A plain link can't send the key and code, so fetch it and hand the browser the file.

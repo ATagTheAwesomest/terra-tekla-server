@@ -4,7 +4,15 @@ using Microsoft.Data.Sqlite;
 
 namespace TerraTeklaServer;
 
-public sealed record Device(string Id, string Name, string Color, string CreatedAt, string LastSeenAt, string? LastIp, string? UserAgent, string? AppVersion);
+/// <summary>
+/// An iPad (or other device running the app). <c>Number</c> is fixed when it is first seen ("User 1",
+/// "User 2"...) and never changes or gets reused, so anything per device (such as its own PowerFab
+/// login later) can hang off it. The name and colour are set on the admin board only.
+/// </summary>
+public sealed record Device(string Id, string Name, string Color, string CreatedAt, string LastSeenAt, string? LastIp, string? UserAgent, string? AppVersion, int Number)
+{
+    public string User => $"User {Number}";
+}
 
 public sealed record Activity(long Id, string At, string? DeviceId, string? DeviceName, string? DeviceColor, string Kind, string? Job,
     string? LoadId, string? LoadNumber, string? StackId, string? StackName, string? Mark, string Text);
@@ -32,6 +40,7 @@ public sealed class Store
         connectionString = new SqliteConnectionStringBuilder { DataSource = settings.DatabasePath, Pooling = true }.ToString();
         using var db = Open();
         Exec(db, Schema);
+        MigrateDeviceNumbers(db);
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
     }
 
@@ -76,6 +85,19 @@ public sealed class Store
             bytes INTEGER NOT NULL, taken_at TEXT NOT NULL, deleted_at TEXT);
         CREATE INDEX IF NOT EXISTS photos_load ON photos (job, load_number);
         """;
+
+    // Databases from before device numbers: add the column and number the devices in the order they
+    // were first seen.
+    static void MigrateDeviceNumbers(SqliteConnection db)
+    {
+        var columns = Rows(db, "PRAGMA table_info(devices)", r => r.GetString(1));
+        if (!columns.Contains("number"))
+            Exec(db, "ALTER TABLE devices ADD COLUMN number INTEGER");
+        var unnumbered = Rows(db, "SELECT id FROM devices WHERE number IS NULL ORDER BY created_at, id", r => r.GetString(0));
+        foreach (var id in unnumbered)
+            Exec(db, "UPDATE devices SET number = (SELECT COALESCE(MAX(number), 0) + 1 FROM devices) WHERE id = $id", ("$id", id));
+        Exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS devices_number ON devices (number)");
+    }
 
     SqliteConnection Open()
     {
@@ -287,11 +309,20 @@ public sealed class Store
         var existing = GetDevice(db, id);
         if (existing is null)
         {
-            var count = Convert.ToInt32(Scalar(db, "SELECT COUNT(*) FROM devices"));
-            var name = $"iPad {count + 1}";
-            Exec(db, "INSERT INTO devices (id, name, color, created_at, last_seen_at, last_ip, user_agent, app_version) VALUES ($id, $name, $color, $now, $now, $ip, $ua, $v)",
-                ("$id", id), ("$name", name), ("$color", Palette[count % Palette.Length]), ("$now", now), ("$ip", ip), ("$ua", Trim(userAgent, 300)), ("$v", Trim(appVersion, 30)));
-            return (GetDevice(db, id)!, true);
+            // One statement, so two new iPads at once can't get the same number (and the same iPad's
+            // first requests arriving together make it once).
+            Exec(db, """
+                INSERT INTO devices (id, number, name, color, created_at, last_seen_at, last_ip, user_agent, app_version)
+                SELECT $id, n, 'User ' || n, '', $now, $now, $ip, $ua, $v FROM (SELECT COALESCE(MAX(number), 0) + 1 AS n FROM devices) WHERE true
+                ON CONFLICT (id) DO NOTHING
+                """, ("$id", id), ("$now", now), ("$ip", ip), ("$ua", Trim(userAgent, 300)), ("$v", Trim(appVersion, 30)));
+            var made = GetDevice(db, id)!;
+            if (made.Color == "")
+            {
+                Exec(db, "UPDATE devices SET color = $color WHERE id = $id", ("$id", id), ("$color", Palette[(made.Number - 1) % Palette.Length]));
+                made = made with { Color = Palette[(made.Number - 1) % Palette.Length] };
+            }
+            return (made, true);
         }
         Exec(db, "UPDATE devices SET last_seen_at = $now, last_ip = $ip, user_agent = COALESCE($ua, user_agent), app_version = COALESCE($v, app_version) WHERE id = $id",
             ("$id", id), ("$now", now), ("$ip", ip), ("$ua", Trim(userAgent, 300)), ("$v", Trim(appVersion, 30)));
@@ -305,16 +336,16 @@ public sealed class Store
     }
 
     static Device? GetDevice(SqliteConnection db, string id) =>
-        Rows(db, "SELECT id, name, color, created_at, last_seen_at, last_ip, user_agent, app_version FROM devices WHERE id = $id", ReadDevice, ("$id", id)).FirstOrDefault();
+        Rows(db, "SELECT id, name, color, created_at, last_seen_at, last_ip, user_agent, app_version, number FROM devices WHERE id = $id", ReadDevice, ("$id", id)).FirstOrDefault();
 
     public List<Device> Devices()
     {
         using var db = Open();
-        return Rows(db, "SELECT id, name, color, created_at, last_seen_at, last_ip, user_agent, app_version FROM devices ORDER BY last_seen_at DESC", ReadDevice);
+        return Rows(db, "SELECT id, name, color, created_at, last_seen_at, last_ip, user_agent, app_version, number FROM devices ORDER BY last_seen_at DESC", ReadDevice);
     }
 
     static Device ReadDevice(SqliteDataReader r) => new(r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
-        r.IsDBNull(5) ? null : r.GetString(5), r.IsDBNull(6) ? null : r.GetString(6), r.IsDBNull(7) ? null : r.GetString(7));
+        r.IsDBNull(5) ? null : r.GetString(5), r.IsDBNull(6) ? null : r.GetString(6), r.IsDBNull(7) ? null : r.GetString(7), r.IsDBNull(8) ? 0 : r.GetInt32(8));
 
     /// <summary>Sets a device's name and/or colour; null leaves that one as it is.</summary>
     public Device UpdateDevice(string id, string? name, string? color, Device by)

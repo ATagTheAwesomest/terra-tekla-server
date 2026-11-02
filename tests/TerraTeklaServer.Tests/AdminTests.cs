@@ -55,9 +55,20 @@ public sealed class AdminTests : IDisposable
         return client;
     }
 
+    // The code the server made up at startup, from DATA_DIR\admin-code.txt.
+    async Task<string> MadeUpCode()
+    {
+        await Client().GetAsync("/health"); // starts the server
+        return File.ReadAllText(AdminLock.CodeFilePath(dataDir)).Split('\n')[0].Trim();
+    }
+
+    // Changes the made-up code to `pin` and returns an unlocked token.
     async Task<string> Setup(string pin = "2468")
     {
-        var reply = await Client().PostAsJsonAsync("/api/admin/setup", new { pin });
+        var code = await MadeUpCode();
+        var unlocked = await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = code });
+        var token = (string)(await unlocked.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
+        var reply = await Client(token).PutAsJsonAsync("/api/admin/pin", new { current = code, pin });
         Assert.Equal(HttpStatusCode.OK, reply.StatusCode);
         return (string)(await reply.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
     }
@@ -77,21 +88,82 @@ public sealed class AdminTests : IDisposable
     }
 
     [Fact]
-    public async Task The_first_code_is_set_once_and_kept_only_as_a_hash()
+    public async Task The_server_makes_up_the_first_code_and_keeps_only_its_hash()
     {
+        var code = await MadeUpCode();
+        Assert.Matches("^[0-9]{6}$", code);
         var lockState = await Client().GetFromJsonAsync<JsonObject>("/api/admin/lock");
-        Assert.False((bool)lockState!["pinSet"]!);
-        Assert.Equal(HttpStatusCode.BadRequest, (await Client().PostAsJsonAsync("/api/admin/setup", new { pin = "12a4" })).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await Client().PostAsJsonAsync("/api/admin/setup", new { pin = "123" })).StatusCode);
-
-        var token = await Setup("2468");
-        Assert.Equal(HttpStatusCode.OK, (await Client(token).GetAsync("/api/admin/stats")).StatusCode);
-        Assert.Equal(HttpStatusCode.Conflict, (await Client().PostAsJsonAsync("/api/admin/setup", new { pin = "1111" })).StatusCode);
+        Assert.True((bool)lockState!["pinSet"]!);
+        // Nobody can pick the first code any more.
+        Assert.NotEqual(HttpStatusCode.OK, (await Client().PostAsJsonAsync("/api/admin/setup", new { pin = "1111" })).StatusCode);
 
         var file = File.ReadAllText(settingsPath);
-        Assert.DoesNotContain("2468", file);
+        Assert.DoesNotContain(code, file);
         Assert.Contains("pbkdf2-sha256$", file);
         Assert.Contains("MaxConcurrentConnections", file);
+
+        // Changing it deletes the written-down code.
+        var token = await Setup("2468");
+        Assert.False(File.Exists(AdminLock.CodeFilePath(dataDir)));
+        Assert.Equal(HttpStatusCode.OK, (await Client(token).GetAsync("/api/admin/stats")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Only_the_admin_board_renames_an_ipad_and_its_number_stays()
+    {
+        var ipad = factory.CreateClient();
+        ipad.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Key);
+        ipad.DefaultRequestHeaders.Add("X-Terra-Device", "ipad-0000-a");
+        await ipad.GetAsync("/api/me");
+        var admin = Client(await Setup());
+        var renamed = await admin.PutAsJsonAsync("/api/admin/devices/ipad-0000-a", new { name = "Yard iPad", color = "#2bd96b" });
+        Assert.Equal(HttpStatusCode.OK, renamed.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PutAsJsonAsync("/api/admin/devices/ipad-0000-a", new { color = "green" })).StatusCode);
+        var me = await ipad.GetFromJsonAsync<JsonObject>("/api/me");
+        Assert.Equal("Yard iPad", (string?)me!["name"]);
+        Assert.Equal("#2bd96b", (string?)me["color"]);
+        Assert.Equal(1, (int)me["number"]!);
+        var history = await ipad.GetFromJsonAsync<JsonArray>("/api/activity?device=admin");
+        Assert.Contains(history!, h => (string?)h!["kind"] == "device-rename");
+    }
+
+    [Fact]
+    public void Devices_from_before_numbers_are_numbered_in_the_order_they_were_first_seen()
+    {
+        var path = Path.Combine(dataDir, "old.db");
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, last_ip TEXT, user_agent TEXT, app_version TEXT);
+                INSERT INTO devices VALUES ('second-device', 'iPad 2', '#2f9bff', '2026-10-30T10:00:00Z', '2026-10-30T10:00:00Z', NULL, NULL, NULL);
+                INSERT INTO devices VALUES ('first-device', 'iPad 1', '#ffb000', '2026-10-29T10:00:00Z', '2026-10-29T10:00:00Z', NULL, NULL, NULL);
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        var oldDir = Path.Combine(dataDir, "old");
+        Directory.CreateDirectory(oldDir);
+        File.Move(path, Path.Combine(oldDir, "terra.db"));
+        var store = new Store(new Settings("", "", "", "", oldDir, [], PhotoSettings.From(new ConfigurationBuilder().Build())));
+        Assert.Equal(1, store.GetDevice("first-device")!.Number);
+        Assert.Equal(2, store.GetDevice("second-device")!.Number);
+        Assert.Equal(3, store.Touch("third-device", null, null, null).Device.Number);
+    }
+
+    [Fact]
+    public async Task A_new_random_code_needs_the_current_one_and_is_shown_once()
+    {
+        var token = await Setup("2468");
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsJsonAsync("/api/admin/pin/generate", new { pin = "2468" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client(token).PostAsJsonAsync("/api/admin/pin/generate", new { pin = "9999" })).StatusCode);
+
+        var made = await (await Client(token).PostAsJsonAsync("/api/admin/pin/generate", new { pin = "2468" })).Content.ReadFromJsonAsync<JsonObject>();
+        var code = (string)made!["code"]!;
+        Assert.Matches("^[0-9]{6}$", code);
+        Assert.Equal(HttpStatusCode.OK, (await Client((string)made["token"]!).GetAsync("/api/admin/stats")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = "2468" })).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Client().PostAsJsonAsync("/api/admin/unlock", new { pin = code })).StatusCode);
     }
 
     [Fact]
