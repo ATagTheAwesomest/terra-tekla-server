@@ -665,6 +665,11 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
     if (uploads.Count > settings.Photos.MaxFiles)
         return Results.Problem($"{uploads.Count} photos in one upload; the limit is {settings.Photos.MaxFiles} (PHOTOS_MAX_PER_UPLOAD).", statusCode: 413);
     var mark = form["mark"].ToString().Trim();
+    // When the iPad took it (photos can wait on the iPad while it is offline); the upload time when
+    // missing or not believable (more than 60 days back or in the future).
+    var takenAt = DateTime.TryParse(form["takenAt"].ToString(), System.Globalization.CultureInfo.InvariantCulture,
+        System.Globalization.DateTimeStyles.RoundtripKind, out var t) && t.ToUniversalTime() > DateTime.UtcNow.AddDays(-60) && t.ToUniversalTime() < DateTime.UtcNow.AddHours(1)
+        ? t.ToLocalTime() : DateTime.Now;
 
     return await PhotosAsync(async () =>
     {
@@ -685,7 +690,7 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
         for (var i = 0; i < uploads.Count; i++)
         {
             await using var s = uploads[i].OpenReadStream();
-            var tag = new PhotoTag(me.User, me.Name, me.Id, job, load, mark == "" ? null : mark, DateTime.Now);
+            var tag = new PhotoTag(me.User, me.Name, me.Id, job, load, mark == "" ? null : mark, takenAt);
             var name = await photos.SaveAsync(job, load, mark, me.Name, types[i], s, ct, tag);
             store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length);
             saved.Add(new { name, bytes = uploads[i].Length });

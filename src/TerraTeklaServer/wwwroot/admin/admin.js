@@ -195,11 +195,13 @@ function checkStatus(state) {
   let extras = 0;
   for (const scan of state.truckCheck?.scans ?? []) {
     // A pallet is checked with one scan for all its pieces (scan.qty).
+    let short = false;
     for (let i = 0; i < Math.max(1, Number(scan.qty) || 1); i++) {
       const id = queues.get(cleanMark(scan.mark))?.shift();
       if (id) checked.set(id, scan);
-      else extras++;
+      else short = true;
     }
+    if (short) extras++;
   }
   return { total, checked, extras, complete: total > 0 && checked.size === total && !extras };
 }

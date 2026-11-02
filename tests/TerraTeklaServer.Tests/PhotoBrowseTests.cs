@@ -202,4 +202,17 @@ public sealed class PhotoBrowseTests : IDisposable
         byte[] png = [0x89, 0x50, 0x4E, 0x47];
         Assert.Same(png, PhotoMetadata.StampJpeg(png, tag));
     }
+
+    [Fact]
+    public async Task A_photo_that_waited_on_the_ipad_keeps_the_time_it_was_taken()
+    {
+        var server = Server();
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Jpeg), "file", "p.jpg");
+        var taken = DateTime.UtcNow.AddDays(-2).Date.AddHours(12);
+        form.Add(new StringContent(taken.ToString("o")), "takenAt");
+        Assert.Equal(HttpStatusCode.Created, (await Keyed(server).PostAsync("/api/photos/1001/8", form)).StatusCode);
+        var text = System.Text.Encoding.Latin1.GetString(await File.ReadAllBytesAsync(Directory.GetFiles(Path.Combine(PhotoRoot, "1001", "8")).Single()));
+        Assert.Contains(taken.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss"), text);
+    }
 }
