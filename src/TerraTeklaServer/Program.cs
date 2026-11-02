@@ -194,15 +194,17 @@ browse.MapGet("/{job}/{load}", (string job, string load, HttpContext http) => Ph
     var files = photos.List(job, load).Select(f =>
     {
         meta.TryGetValue(f.Name, out var m);
-        var device = m?.DeviceId is { } id && devices.TryGetValue(id, out var d) ? d : null;
+        var who = PhotoWho(m, devices, folder, f.Name);
         return new
         {
             name = f.Name,
             bytes = f.Bytes,
             modified = f.Modified,
             mark = m?.Mark,
-            by = device?.Name ?? m?.DeviceName,
-            color = device?.Color,
+            by = who.By,
+            user = who.User,
+            byGuess = who.Guess,
+            color = who.Color,
             path = keyed ? Path.Combine(folder, f.Name) : null,
         };
     });
@@ -598,25 +600,33 @@ api.MapGet("/photos", () => new
     types = settings.Photos.Types,
 });
 
-api.MapGet("/photos/recent", (string? device, int? limit) => settings.Photos.Enabled ? Results.Json(store.RecentPhotos(device, limit ?? 60)) : PhotosDisabled());
+api.MapGet("/photos/recent", (string? device, int? limit) => settings.Photos.Enabled
+    ? Results.Json(store.RecentPhotos(device, limit ?? 60).Select(p => new
+    {
+        p.Id, p.Job, p.LoadNumber, p.FileName, p.Mark, p.DeviceId, p.DeviceName, p.Bytes, p.TakenAt, p.User,
+    }))
+    : PhotosDisabled());
 
 api.MapGet("/photos/{job}/{load}", (string job, string load) => PhotosAsync(() =>
 {
     var meta = store.Photos(job, load);
     var devices = store.Devices().ToDictionary(d => d.Id);
+    var folder = photos.LoadFolder(job, load);
     var files = photos.List(job, load).Select(f =>
     {
         meta.TryGetValue(f.Name, out var m);
-        var device = m?.DeviceId is { } id && devices.TryGetValue(id, out var d) ? d : null;
+        var who = PhotoWho(m, devices, folder, f.Name);
         return new
         {
             name = f.Name,
             bytes = f.Bytes,
             modified = f.Modified,
             mark = m?.Mark,
-            by = device?.Name ?? m?.DeviceName,
+            by = who.By,
+            user = who.User,
+            byGuess = who.Guess,
             byId = m?.DeviceId,
-            color = device?.Color,
+            color = who.Color,
         };
     });
     return Task.FromResult(Results.Json(new { job, load, files }));
@@ -675,7 +685,8 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
         for (var i = 0; i < uploads.Count; i++)
         {
             await using var s = uploads[i].OpenReadStream();
-            var name = await photos.SaveAsync(job, load, mark, me.Name, types[i], s, ct);
+            var tag = new PhotoTag(me.User, me.Name, me.Id, job, load, mark == "" ? null : mark, DateTime.Now);
+            var name = await photos.SaveAsync(job, load, mark, me.Name, types[i], s, ct, tag);
             store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length);
             saved.Add(new { name, bytes = uploads[i].Length });
         }
@@ -706,6 +717,28 @@ Device? Me(HttpContext http, bool required = false)
     if (created)
         hub.Broadcast(new { type = "devices", devices = DeviceList() });
     return device;
+}
+
+// Who took a photo: from the database (the iPad's current name and fixed "User N"), else from the
+// TERRA tag in the file, else from its file name (marked as a guess), else unknown (nulls).
+(string? By, string? User, string? Color, bool Guess) PhotoWho(PhotoMeta? m, Dictionary<string, Device> devices, string folder, string name)
+{
+    if (m is not null && (m.DeviceId is not null || m.DeviceName is not null))
+    {
+        var device = m.DeviceId is { } id && devices.TryGetValue(id, out var d) ? d : null;
+        return (device?.Name ?? m.DeviceName, device?.User ?? m.User, device?.Color, false);
+    }
+    if (PhotoMetadata.ReadUser(Path.Combine(folder, name)) is { } tagged)
+    {
+        var device = devices.Values.FirstOrDefault(d => d.User == tagged.User);
+        return (tagged.Name == "" ? tagged.User : tagged.Name, tagged.User, device?.Color, false);
+    }
+    if (PhotoMetadata.UserFromFileName(name) is { } guess)
+    {
+        var device = devices.Values.FirstOrDefault(d => d.Name.Equals(guess, StringComparison.OrdinalIgnoreCase));
+        return (device?.Name ?? guess, device?.User, device?.Color, true);
+    }
+    return (null, null, null, false);
 }
 
 static string? CleanDeviceId(string? id) =>

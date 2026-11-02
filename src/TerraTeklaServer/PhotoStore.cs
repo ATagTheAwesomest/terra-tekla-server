@@ -168,7 +168,8 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
     /// <summary>Saves one checked file in the load's folder under a new name and returns that name.</summary>
     /// The name is <c>&lt;date-time&gt;_&lt;mark or "load"&gt;_&lt;user&gt;.&lt;ext&gt;</c>, so a folder of photos
     /// shows who took each one in Explorer too.
-    public async Task<string> SaveAsync(string job, string load, string? mark, string? user, string type, Stream content, CancellationToken ct)
+    /// A JPEG also gets <paramref name="tag"/> (who took it) written into it, see <see cref="PhotoMetadata"/>.
+    public async Task<string> SaveAsync(string job, string load, string? mark, string? user, string type, Stream content, CancellationToken ct, PhotoTag? tag = null)
     {
         var folder = LoadFolder(job, load);
         var label = string.IsNullOrWhiteSpace(mark) ? "load" : CleanName(mark.Trim(), "Mark");
@@ -180,7 +181,16 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
         try
         {
             await using (var file = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
-                await content.CopyToAsync(file, ct);
+            {
+                if (tag is not null && type == "jpg")
+                {
+                    using var buffer = new MemoryStream();
+                    await content.CopyToAsync(buffer, ct);
+                    await file.WriteAsync(PhotoMetadata.StampJpeg(buffer.ToArray(), tag), ct);
+                }
+                else
+                    await content.CopyToAsync(file, ct);
+            }
 
             // Never overwrite: two photos in the same second get "(2)", "(3)"...
             for (var n = 1; ; n++)

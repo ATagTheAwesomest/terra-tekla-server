@@ -12,8 +12,22 @@ D:\TerraPhotos\EPM-001\Load 8\20261028-143611_1001-C1_Yard iPad.jpg
 \\fileserver\Jobs\2026\26101\Photos\Load 3\20261028-150012_load_Dock iPad (2).jpg
 ```
 
-The server also keeps a record of each photo in its database (piece, iPad, size, time), so the app
-and the admin page can show who took it even after the iPad is renamed.
+The server also keeps a record of each photo in its database (piece, iPad and its fixed "User N",
+size, time), so the app and the admin page can show who took it even after the iPad is renamed.
+
+**Who took it, inside the file.** A JPEG (what the app's camera makes) also gets who took it written
+into the photo itself, so it stays with the file wherever it is copied. In Windows Explorer it shows
+under Properties › Details as **Authors** ("User 3 (Yard iPad)") and **Comments** ("Job EPM-001 load
+8, 1001-C1. Taken by User 3 (Yard iPad) with the TERRA app."); Photoshop, Lightroom and exiftool show
+it too. Two standard blocks are added: EXIF (Artist, ImageDescription, DateTime, XPAuthor,
+XPComment) and XMP (`dc:creator`, `dc:description`, `xmp:CreateDate`, and `terra:User`,
+`terra:DeviceName`, `terra:DeviceId`, `terra:Job`, `terra:Load`, `terra:Mark`). Each is added only
+if the photo doesn't have one already: nothing a camera wrote is changed. PNG, HEIC, WebP and PDF
+files are saved as sent (the database still records who took them).
+
+Photos from before this, or copied into a load folder by hand, have no database record: the explorer
+and the admin board then go by the TERRA tag in the file, else by the iPad name in the file name
+(shown as "probably"), else "unknown".
 
 Photos are off until `PHOTOS_ENABLED` is turned on. The app has its own switch too (Server settings,
 "Send photos to the server"), off until turned on on each iPad.

@@ -17,7 +17,11 @@ public sealed record Device(string Id, string Name, string Color, string Created
 public sealed record Activity(long Id, string At, string? DeviceId, string? DeviceName, string? DeviceColor, string Kind, string? Job,
     string? LoadId, string? LoadNumber, string? StackId, string? StackName, string? Mark, string Text);
 
-public sealed record PhotoMeta(long Id, string Job, string LoadNumber, string FileName, string? Mark, string? DeviceId, string? DeviceName, long Bytes, string TakenAt);
+public sealed record PhotoMeta(long Id, string Job, string LoadNumber, string FileName, string? Mark, string? DeviceId, string? DeviceName, long Bytes, string TakenAt, int? DeviceNumber = null)
+{
+    /// <summary>The iPad's fixed "User N", when the photo was taken by a known iPad.</summary>
+    public string? User => DeviceNumber is { } n ? $"User {n}" : null;
+}
 
 /// <summary>
 /// The SQLite database (DATA_DIR\terra.db): devices, every load's stacks and rows, the shared truck
@@ -41,6 +45,9 @@ public sealed class Store
         using var db = Open();
         Exec(db, Schema);
         MigrateDeviceNumbers(db);
+        AddColumn(db, "stacks", "pallet", "TEXT");
+        AddColumn(db, "check_scans", "qty", "INTEGER NOT NULL DEFAULT 1");
+        AddColumn(db, "photos", "device_number", "INTEGER");
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
     }
 
@@ -97,6 +104,13 @@ public sealed class Store
         foreach (var id in unnumbered)
             Exec(db, "UPDATE devices SET number = (SELECT COALESCE(MAX(number), 0) + 1 FROM devices) WHERE id = $id", ("$id", id));
         Exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS devices_number ON devices (number)");
+    }
+
+    // A column added after the first release, for databases made before it.
+    static void AddColumn(SqliteConnection db, string table, string column, string type)
+    {
+        if (!Rows(db, $"PRAGMA table_info({table})", r => r.GetString(1)).Contains(column))
+            Exec(db, $"ALTER TABLE {table} ADD COLUMN {column} {type}");
     }
 
     SqliteConnection Open()
@@ -222,8 +236,14 @@ public sealed class Store
                 Removed = JsonSerializer.Deserialize<List<Removal>>(r.GetString(7)) ?? [],
             };
         }
-        s.Stacks = Rows(db, "SELECT id, name, created_by FROM stacks WHERE load_id = $id ORDER BY position",
-            r => new Stack { Id = r.GetString(0), Name = r.GetString(1), CreatedBy = r.IsDBNull(2) ? null : r.GetString(2) }, ("$id", loadId));
+        s.Stacks = Rows(db, "SELECT id, name, created_by, pallet FROM stacks WHERE load_id = $id ORDER BY position",
+            r => new Stack
+            {
+                Id = r.GetString(0),
+                Name = r.GetString(1),
+                CreatedBy = r.IsDBNull(2) ? null : r.GetString(2),
+                Pallet = r.IsDBNull(3) ? null : JsonSerializer.Deserialize<Pallet>(r.GetString(3), Json.Options),
+            }, ("$id", loadId));
         var byId = s.Stacks.ToDictionary(st => st.Id);
         foreach (var (stackId, entry) in Rows(db, """
             SELECT stack_id, id, mark, sequence, manual, pending, removing, scanned_at, scanned_by, added_at, rev, details
@@ -249,8 +269,8 @@ public sealed class Store
         if (s.Stacks.Count == 0)
             s.Stacks.Add(new Stack { Id = LoadOps.DefaultStackId(loadId), Name = $"Stack {s.LoadNumber} - 1" });
         if (s.TruckCheck is not null)
-            s.TruckCheck.Scans = Rows(db, "SELECT id, mark, manual, scanned_at, scanned_by FROM check_scans WHERE load_id = $id ORDER BY position",
-                r => new CheckScan { Id = r.GetString(0), Mark = r.GetString(1), Manual = r.GetInt64(2) != 0, ScannedAt = r.GetString(3), ScannedBy = r.IsDBNull(4) ? null : r.GetString(4) },
+            s.TruckCheck.Scans = Rows(db, "SELECT id, mark, manual, scanned_at, scanned_by, qty FROM check_scans WHERE load_id = $id ORDER BY position",
+                r => new CheckScan { Id = r.GetString(0), Mark = r.GetString(1), Manual = r.GetInt64(2) != 0, ScannedAt = r.GetString(3), ScannedBy = r.IsDBNull(4) ? null : r.GetString(4), Qty = (int)Math.Max(1, r.GetInt64(5)) },
                 ("$id", loadId));
         return s;
     }
@@ -273,8 +293,9 @@ public sealed class Store
         for (var si = 0; si < s.Stacks.Count; si++)
         {
             var st = s.Stacks[si];
-            Exec(db, "INSERT INTO stacks (id, load_id, position, name, created_by) VALUES ($id, $load, $pos, $name, $by)",
-                ("$id", st.Id), ("$load", s.LoadId), ("$pos", si), ("$name", st.Name), ("$by", st.CreatedBy));
+            Exec(db, "INSERT INTO stacks (id, load_id, position, name, created_by, pallet) VALUES ($id, $load, $pos, $name, $by, $pallet)",
+                ("$id", st.Id), ("$load", s.LoadId), ("$pos", si), ("$name", st.Name), ("$by", st.CreatedBy),
+                ("$pallet", st.Pallet is null ? null : JsonSerializer.Serialize(st.Pallet, Json.Options)));
             for (var i = 0; i < st.Items.Count; i++)
             {
                 var e = st.Items[i];
@@ -291,8 +312,8 @@ public sealed class Store
         for (var i = 0; i < (s.TruckCheck?.Scans.Count ?? 0); i++)
         {
             var c = s.TruckCheck!.Scans[i];
-            Exec(db, "INSERT INTO check_scans (id, load_id, position, mark, manual, scanned_at, scanned_by) VALUES ($id, $load, $pos, $mark, $manual, $at, $by)",
-                ("$id", c.Id), ("$load", s.LoadId), ("$pos", i), ("$mark", c.Mark), ("$manual", c.Manual ? 1 : 0), ("$at", c.ScannedAt), ("$by", c.ScannedBy));
+            Exec(db, "INSERT INTO check_scans (id, load_id, position, mark, manual, scanned_at, scanned_by, qty) VALUES ($id, $load, $pos, $mark, $manual, $at, $by, $qty)",
+                ("$id", c.Id), ("$load", s.LoadId), ("$pos", i), ("$mark", c.Mark), ("$manual", c.Manual ? 1 : 0), ("$at", c.ScannedAt), ("$by", c.ScannedBy), ("$qty", Math.Max(1, c.Qty)));
         }
     }
 
@@ -420,8 +441,8 @@ public sealed class Store
     public void AddPhoto(string job, string loadNumber, string fileName, string? mark, Device device, long bytes)
     {
         using var db = Open();
-        Exec(db, "INSERT INTO photos (job, load_number, file_name, mark, device_id, device_name, bytes, taken_at) VALUES ($job, $load, $file, $mark, $dev, $name, $bytes, $at)",
-            ("$job", job), ("$load", loadNumber), ("$file", fileName), ("$mark", mark), ("$dev", device.Id), ("$name", device.Name), ("$bytes", bytes), ("$at", DateTime.UtcNow.ToString("o")));
+        Exec(db, "INSERT INTO photos (job, load_number, file_name, mark, device_id, device_name, device_number, bytes, taken_at) VALUES ($job, $load, $file, $mark, $dev, $name, $num, $bytes, $at)",
+            ("$job", job), ("$load", loadNumber), ("$file", fileName), ("$mark", mark), ("$dev", device.Id), ("$name", device.Name), ("$num", device.Number), ("$bytes", bytes), ("$at", DateTime.UtcNow.ToString("o")));
     }
 
     public void PhotoDeleted(string job, string loadNumber, string fileName)
@@ -435,8 +456,8 @@ public sealed class Store
     public Dictionary<string, PhotoMeta> Photos(string job, string loadNumber)
     {
         using var db = Open();
-        return Rows(db, "SELECT id, job, load_number, file_name, mark, device_id, device_name, bytes, taken_at FROM photos WHERE job = $job AND load_number = $load AND deleted_at IS NULL",
-                r => new PhotoMeta(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), N(r, 5), N(r, 6), r.GetInt64(7), r.GetString(8)),
+        return Rows(db, "SELECT p.id, p.job, p.load_number, p.file_name, p.mark, p.device_id, p.device_name, p.bytes, p.taken_at, COALESCE(p.device_number, d.number) FROM photos p LEFT JOIN devices d ON d.id = p.device_id WHERE p.job = $job AND p.load_number = $load AND p.deleted_at IS NULL",
+                ReadPhoto,
                 ("$job", job), ("$load", loadNumber))
             .GroupBy(p => p.FileName).ToDictionary(g => g.Key, g => g.Last());
     }
@@ -454,11 +475,14 @@ public sealed class Store
         return Rows(db, "SELECT DISTINCT load_number FROM photos WHERE job = $job AND deleted_at IS NULL", r => r.GetString(0), ("$job", job));
     }
 
+    static PhotoMeta ReadPhoto(SqliteDataReader r) =>
+        new(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), N(r, 5), N(r, 6), r.GetInt64(7), r.GetString(8), r.IsDBNull(9) ? null : r.GetInt32(9));
+
     public List<PhotoMeta> RecentPhotos(string? deviceId, int limit)
     {
         using var db = Open();
-        return Rows(db, $"SELECT id, job, load_number, file_name, mark, device_id, device_name, bytes, taken_at FROM photos WHERE deleted_at IS NULL {(deviceId is null ? "" : "AND device_id = $dev")} ORDER BY id DESC LIMIT $limit",
-            r => new PhotoMeta(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), N(r, 5), N(r, 6), r.GetInt64(7), r.GetString(8)),
+        return Rows(db, $"SELECT p.id, p.job, p.load_number, p.file_name, p.mark, p.device_id, p.device_name, p.bytes, p.taken_at, COALESCE(p.device_number, d.number) FROM photos p LEFT JOIN devices d ON d.id = p.device_id WHERE p.deleted_at IS NULL {(deviceId is null ? "" : "AND p.device_id = $dev")} ORDER BY p.id DESC LIMIT $limit",
+            ReadPhoto,
             ("$dev", deviceId), ("$limit", Math.Clamp(limit, 1, 200)));
     }
 
