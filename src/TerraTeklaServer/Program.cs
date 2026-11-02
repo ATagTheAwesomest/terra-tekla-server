@@ -691,7 +691,7 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
         {
             await using var s = uploads[i].OpenReadStream();
             var tag = new PhotoTag(me.User, me.Name, me.Id, job, load, mark == "" ? null : mark, takenAt);
-            var name = await photos.SaveAsync(job, load, mark, me.Name, types[i], s, ct, tag);
+            var name = await photos.SaveAsync(job, load, mark, types[i], s, ct, tag);
             store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length);
             saved.Add(new { name, bytes = uploads[i].Length });
         }

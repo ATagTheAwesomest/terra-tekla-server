@@ -2,32 +2,36 @@
 
 The TERRA app (Shipping) can take photos of a load, or of one piece on it, and send them to this
 server. Each one is saved in a folder for the job, then a folder for the load, and its name says when
-it was taken, of what, and by which iPad (the name set in the app's Server settings):
+it was taken (date and time split up with dots) and of what. Who took it is not in the name: it is
+written into the photo as its author (see below).
 
 ```
-<job folder>\<load folder>\<date-time>_<mark or "load">_<iPad name>.<ext>
+<job folder>\<load folder>\<yyyy.MM.dd>_<HH.mm.ss>_<mark or "load">.<ext>
 
-D:\TerraPhotos\EPM-001\Load 8\20261028-143502_load_Dock iPad.jpg
-D:\TerraPhotos\EPM-001\Load 8\20261028-143611_1001-C1_Yard iPad.jpg
-\\fileserver\Jobs\2026\26101\Photos\Load 3\20261028-150012_load_Dock iPad (2).jpg
+D:\TerraPhotos\EPM-001\Load 8\2026.10.28_14.35.02_load.jpg
+D:\TerraPhotos\EPM-001\Load 8\2026.10.28_14.36.11_1001-C1.jpg
+\\fileserver\Jobs\2026\26101\Photos\Load 3\2026.10.28_15.00.12_load (2).jpg
 ```
+
+Photos saved by older versions are named `20261028-143611_1001-C1_Yard iPad.jpg` (the iPad name at
+the end). They are left as they are, and the app, the explorer and the admin board read both styles.
 
 The server also keeps a record of each photo in its database (piece, iPad and its fixed "User N",
 size, time), so the app and the admin page can show who took it even after the iPad is renamed.
 
 **Who took it, inside the file.** A JPEG (what the app's camera makes) also gets who took it written
 into the photo itself, so it stays with the file wherever it is copied. In Windows Explorer it shows
-under Properties › Details as **Authors** ("User 3 (Yard iPad)") and **Comments** ("Job EPM-001 load
-8, 1001-C1. Taken by User 3 (Yard iPad) with the TERRA app."); Photoshop, Lightroom and exiftool show
-it too. Two standard blocks are added: EXIF (Artist, ImageDescription, DateTime, XPAuthor,
+under Properties › Details as **Authors** ("User 3 (Yard iPad)"), and only there; **Title** and
+**Comments** say what the photo is of ("Job EPM-001 load 8, 1001-C1"). Photoshop, Lightroom and
+exiftool show the author too. Two standard blocks are added: EXIF (Artist, ImageDescription, DateTime, XPAuthor,
 XPComment) and XMP (`dc:creator`, `dc:description`, `xmp:CreateDate`, and `terra:User`,
 `terra:DeviceName`, `terra:DeviceId`, `terra:Job`, `terra:Load`, `terra:Mark`). Each is added only
 if the photo doesn't have one already: nothing a camera wrote is changed. PNG, HEIC, WebP and PDF
 files are saved as sent (the database still records who took them).
 
 Photos from before this, or copied into a load folder by hand, have no database record: the explorer
-and the admin board then go by the TERRA tag in the file, else by the iPad name in the file name
-(shown as "probably"), else "unknown".
+and the admin board then go by the TERRA tag in the file, else by the iPad name at the end of an
+old-style file name (shown as "probably"), else "unknown".
 
 Photos are off until `PHOTOS_ENABLED` is turned on. The app has its own switch too (Server settings,
 "Send photos to the server"), off until turned on on each iPad.
@@ -109,12 +113,11 @@ To check a rule without the app, list a load's photos (this creates nothing):
 ## What is checked
 
 - The access key, as for every `/api` route (`Authorization: Bearer <ACCESS_KEY>`). Uploads also need
-  the iPad's `X-Terra-Device` header, which is how the photo gets its iPad name.
+  the iPad's `X-Terra-Device` header, which is how the server knows who took the photo.
 - Job, load and mark: 1 to 64 characters; none of `< > : " / \ | ? *` or control characters; not `.`
   or `..`; no leading/trailing space or trailing dot; not a Windows device name (`CON`, `NUL`,
   `COM1`...). Anything else is refused with 400, never cleaned up, so a name can't reach a folder
   outside its job folder. The final path is also checked to be inside the job folder.
-- The iPad name in a file name has those characters replaced with `-` and is cut to 40 characters.
 - Each file's size (`PHOTOS_MAX_MB`, 413) and type by its first bytes (`PHOTOS_TYPES`, 415). The name
   the app gives a file is ignored; the server names every file itself and never overwrites one
   (a second photo in the same second gets ` (2)`).
@@ -181,7 +184,7 @@ curl -H "Authorization: Bearer $ACCESS_KEY" -H "X-Terra-Device: test-device-0001
 $h = @{ Authorization = "Bearer $key" }
 Invoke-RestMethod http://127.0.0.1:8095/api/photos -Headers $h
 Invoke-RestMethod http://127.0.0.1:8095/api/photos/EPM-001/8 -Headers $h
-Invoke-WebRequest "http://127.0.0.1:8095/api/photos/EPM-001/8/20261028-143502_load_Dock%20iPad.jpg" -Headers $h -OutFile photo.jpg
+Invoke-WebRequest "http://127.0.0.1:8095/api/photos/EPM-001/8/2026.10.28_14.35.02_load.jpg" -Headers $h -OutFile photo.jpg
 ```
 
 ## Setting it up on the server (checklist)

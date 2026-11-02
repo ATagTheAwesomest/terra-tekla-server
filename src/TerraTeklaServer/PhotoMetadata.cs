@@ -14,7 +14,8 @@ public sealed record PhotoTag(string User, string Name, string DeviceId, string 
     /// <summary>"User 3", or "User 3 (Yard iPad)" when the iPad has its own name.</summary>
     public string Who => Name == "" || Name.Equals(User, StringComparison.OrdinalIgnoreCase) ? User : $"{User} ({Name})";
 
-    public string Description => $"Job {Job} load {Load}{(string.IsNullOrEmpty(Mark) ? "" : $", {Mark}")}. Taken by {Who} with the TERRA app.";
+    /// <summary>What the photo is of (Explorer's Title, Subject and Comments). Who took it is only in the author fields.</summary>
+    public string Description => $"Job {Job} load {Load}{(string.IsNullOrEmpty(Mark) ? "" : $", {Mark}")}";
 }
 
 /// <summary>
@@ -196,13 +197,16 @@ public static class PhotoMetadata
 
     static string WebUnescape(string s) => System.Net.WebUtility.HtmlDecode(s);
 
+    // Only the old style ("20261102-101500_<mark>_<iPad>.jpg") had the iPad in the name. Names made
+    // since ("2026.11.02_10.15.00_<mark>.jpg") never do, so they don't match and give no guess.
     static readonly Regex SavedName = new(@"^\d{8}-\d{6}_(?<rest>.+?)(?: \(\d+\))?\.[A-Za-z0-9]+$", RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// The iPad name in a file name this server made, "20261102-101500_1001-C1_Yard iPad.jpg"
-    /// (see <see cref="PhotoStore.SaveAsync"/>), for photos the database has no record of (copied in, or
-    /// from before it). Null when the name doesn't have one. A guess: a mark with "_" in it and no
-    /// user part would read wrongly, which is why it is only the last fallback.
+    /// The iPad name in a file name an older server made, "20261102-101500_1001-C1_Yard iPad.jpg",
+    /// for photos the database has no record of (copied in, or from before it). Null when the name
+    /// doesn't have one, which includes every name made now ("2026.11.02_10.15.00_1001-C1.jpg": who took
+    /// it is only in the file's metadata). A guess: an old mark with "_" in it and no user part would
+    /// read wrongly, which is why it is only the last fallback.
     /// </summary>
     public static string? UserFromFileName(string name)
     {
