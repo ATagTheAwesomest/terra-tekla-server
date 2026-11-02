@@ -155,6 +155,12 @@ public sealed class PhotoBrowseTests : IDisposable
         Assert.Contains("<terra:User>User 1</terra:User>", text);
         Assert.Contains("<dc:creator><rdf:Seq><rdf:li>User 1</rdf:li>", text);
         Assert.Equal(("User 1", "User 1"), PhotoMetadata.ReadUser(saved));
+        // Who took it is only the author: not in the file name, not in the title/description.
+        Assert.Matches(@"^\d{4}\.\d{2}\.\d{2}_\d{2}\.\d{2}\.\d{2}_load(?: \(\d+\))?\.jpg$", Path.GetFileName(saved));
+        Assert.DoesNotContain("User 1", Path.GetFileName(saved));
+        Assert.DoesNotContain("Taken by", text);
+        Assert.Contains("<dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">Job 1001 load 8</rdf:li>", text);
+        Assert.Null(PhotoMetadata.UserFromFileName(Path.GetFileName(saved)));
         Assert.Equal(new byte[] { 0xFF, 0xD9 }, bytes[^2..]);
     }
 

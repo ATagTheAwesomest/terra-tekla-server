@@ -166,17 +166,17 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
     }
 
     /// <summary>Saves one checked file in the load's folder under a new name and returns that name.</summary>
-    /// The name is <c>&lt;date-time&gt;_&lt;mark or "load"&gt;_&lt;user&gt;.&lt;ext&gt;</c>, so a folder of photos
-    /// shows who took each one in Explorer too.
-    /// A JPEG also gets <paramref name="tag"/> (who took it) written into it, see <see cref="PhotoMetadata"/>.
-    public async Task<string> SaveAsync(string job, string load, string? mark, string? user, string type, Stream content, CancellationToken ct, PhotoTag? tag = null)
+    /// The name is <c>&lt;yyyy.MM.dd&gt;_&lt;HH.mm.ss&gt;_&lt;mark or "load"&gt;.&lt;ext&gt;</c>, for example
+    /// "2026.11.02_14.05.33_1001-C1.jpg". Who took it is not in the name: a JPEG gets it written into the
+    /// file as its author (<paramref name="tag"/>, see <see cref="PhotoMetadata"/>), and the database keeps it
+    /// for every file type.
+    public async Task<string> SaveAsync(string job, string load, string? mark, string type, Stream content, CancellationToken ct, PhotoTag? tag = null)
     {
         var folder = LoadFolder(job, load);
         var label = string.IsNullOrWhiteSpace(mark) ? "load" : CleanName(mark.Trim(), "Mark");
         Directory.CreateDirectory(folder);
 
-        var who = UserLabel(user);
-        var stem = $"{DateTime.Now:yyyyMMdd-HHmmss}_{label}{(who == "" ? "" : $"_{who}")}";
+        var stem = $"{DateTime.Now.ToString(StampFormat, System.Globalization.CultureInfo.InvariantCulture)}_{label}";
         var temp = Path.Combine(folder, $".upload-{Guid.NewGuid():N}.tmp");
         try
         {
@@ -215,19 +215,8 @@ public sealed class PhotoStore(PhotoSettings settings, ILogger<PhotoStore> log)
         }
     }
 
-    /// <summary>
-    /// A device name made safe for a file name: characters a file name can't hold become "-",
-    /// "_" (which splits the name's parts) becomes a space, at most 40 characters. Unlike job,
-    /// load and mark it is cleaned, not refused, since people name their iPads whatever they like.
-    /// </summary>
-    public static string UserLabel(string? user)
-    {
-        var chars = (user ?? "").Select(c => BadChars.Contains(c) || char.IsControl(c) ? '-' : c == '_' ? ' ' : c).ToArray();
-        var name = new string(chars).Trim();
-        if (name.Length > 40)
-            name = name[..40].Trim();
-        return name.TrimEnd('.').Trim();
-    }
+    /// <summary>The date and time at the start of a saved photo's name: "2026.11.02_14.05.33".</summary>
+    public const string StampFormat = "yyyy.MM.dd_HH.mm.ss";
 
     /// <summary>
     /// The loads that have a folder in a job's folder, worked out backwards from the load folder
