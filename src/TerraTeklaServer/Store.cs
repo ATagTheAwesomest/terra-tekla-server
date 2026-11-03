@@ -438,11 +438,12 @@ public sealed class Store
 
     // ---- Photos ------------------------------------------------------------------------
 
-    public void AddPhoto(string job, string loadNumber, string fileName, string? mark, Device device, long bytes)
+    /// <param name="takenAt">When the iPad took it (kept in taken_at, so "newest first" is by when it was taken, not uploaded).</param>
+    public void AddPhoto(string job, string loadNumber, string fileName, string? mark, Device device, long bytes, DateTime? takenAt = null)
     {
         using var db = Open();
         Exec(db, "INSERT INTO photos (job, load_number, file_name, mark, device_id, device_name, device_number, bytes, taken_at) VALUES ($job, $load, $file, $mark, $dev, $name, $num, $bytes, $at)",
-            ("$job", job), ("$load", loadNumber), ("$file", fileName), ("$mark", mark), ("$dev", device.Id), ("$name", device.Name), ("$num", device.Number), ("$bytes", bytes), ("$at", DateTime.UtcNow.ToString("o")));
+            ("$job", job), ("$load", loadNumber), ("$file", fileName), ("$mark", mark), ("$dev", device.Id), ("$name", device.Name), ("$num", device.Number), ("$bytes", bytes), ("$at", (takenAt ?? DateTime.UtcNow).ToUniversalTime().ToString("o")));
     }
 
     public void PhotoDeleted(string job, string loadNumber, string fileName)
@@ -475,13 +476,23 @@ public sealed class Store
         return Rows(db, "SELECT DISTINCT load_number FROM photos WHERE job = $job AND deleted_at IS NULL", r => r.GetString(0), ("$job", job));
     }
 
+    /// <summary>Everything the database knows about every photo not deleted, by "job|load|file" (any case).</summary>
+    public Dictionary<string, PhotoMeta> AllPhotos()
+    {
+        using var db = Open();
+        var all = new Dictionary<string, PhotoMeta>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in Rows(db, "SELECT p.id, p.job, p.load_number, p.file_name, p.mark, p.device_id, p.device_name, p.bytes, p.taken_at, COALESCE(p.device_number, d.number) FROM photos p LEFT JOIN devices d ON d.id = p.device_id WHERE p.deleted_at IS NULL ORDER BY p.id", ReadPhoto))
+            all[$"{p.Job}|{p.LoadNumber}|{p.FileName}"] = p;
+        return all;
+    }
+
     static PhotoMeta ReadPhoto(SqliteDataReader r) =>
         new(r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3), N(r, 4), N(r, 5), N(r, 6), r.GetInt64(7), r.GetString(8), r.IsDBNull(9) ? null : r.GetInt32(9));
 
     public List<PhotoMeta> RecentPhotos(string? deviceId, int limit)
     {
         using var db = Open();
-        return Rows(db, $"SELECT p.id, p.job, p.load_number, p.file_name, p.mark, p.device_id, p.device_name, p.bytes, p.taken_at, COALESCE(p.device_number, d.number) FROM photos p LEFT JOIN devices d ON d.id = p.device_id WHERE p.deleted_at IS NULL {(deviceId is null ? "" : "AND p.device_id = $dev")} ORDER BY p.id DESC LIMIT $limit",
+        return Rows(db, $"SELECT p.id, p.job, p.load_number, p.file_name, p.mark, p.device_id, p.device_name, p.bytes, p.taken_at, COALESCE(p.device_number, d.number) FROM photos p LEFT JOIN devices d ON d.id = p.device_id WHERE p.deleted_at IS NULL {(deviceId is null ? "" : "AND p.device_id = $dev")} ORDER BY p.taken_at DESC, p.id DESC LIMIT $limit",
             ReadPhoto,
             ("$dev", deviceId), ("$limit", Math.Clamp(limit, 1, 200)));
     }
