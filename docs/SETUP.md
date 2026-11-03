@@ -2,7 +2,7 @@
 
 terra-tekla-server is the shop's own server for the TERRA iPad app (terra-tekla-client). It:
 
-- **hosts the iPad app**, so it no longer needs GitHub Pages: the iPads open this server's address;
+- **hosts the iPad app**: the iPads open this server's address;
 - **keeps everything PowerFab doesn't**: stacks, which iPad scanned each piece, the truck check,
   device names and colours, the activity history and photos, in one SQLite database;
 - **syncs the iPads live**: a scan, move or rename on one iPad shows on the others at once
@@ -101,7 +101,6 @@ admin part of the iPad app's **Server settings / Admin**.
 - It is changed only on the admin board (Settings > Admin code), on a device that is unlocked:
   **Make a new code** (6 new random digits) or **Choose a code**. `admin-code.txt` always holds the
   code in use: it is rewritten on every change. Changing it locks every other device out.
-  (A code set before v0.3.2 is written there the first time it is changed.)
 - Entering it unlocks **that device, from that IP address, for 30 minutes** (`ADMIN_LOCK_MINUTES`),
   then it locks again. The iPad app and the admin board share the unlock on the same iPad. Lock now
   ends it early; a server restart ends every unlock.
@@ -206,10 +205,11 @@ release zip built elsewhere with `windows\build-release.ps1`.
 Safari only runs the app's offline cache and "Add to Home Screen" app mode from an `https://` address
 (or `localhost`). Pick one:
 
-- **Cloudflare Tunnel** (what the conversion layer used): point the tunnel's public hostname at
-  `http://localhost:8095` instead of the conversion layer. WebSockets go through Cloudflare tunnels
-  with no extra setting. The conversion layer then needs no tunnel at all: only this server talks to
-  it, on `127.0.0.1`. Cloudflare Access can sit in front as before.
+- **Cloudflare Tunnel**: one public hostname, no path, pointing at `http://localhost:8095`. That
+  one hostname serves everything (`/`, `/admin/`, `/api/*`, `/ws`, `/health`). In the Cloudflare
+  dashboard keep WebSockets on and Rocket Loader off, and add a cache rule that bypasses the cache
+  for that hostname. The conversion layer needs no tunnel: only this server talks to it, on
+  `127.0.0.1`.
 - **A certificate on this server**: give Kestrel a certificate in `local.settings.json`, e.g.
   ```json
   "Urls": "https://0.0.0.0:8095",
@@ -231,10 +231,6 @@ offline or installed to the home screen.
    admin board (Devices > the iPad). The name and colour show on everything it scans, on its photos
    and in the history.
 4. Share > Add to Home Screen.
-
-An iPad that used the GitHub Pages copy keeps working against this server if its Server address is
-set to this server, but its stacks start fresh from the server (stacks kept only on that iPad before
-are not copied). Open the server's own address instead and add that to the home screen.
 
 ## Updating
 

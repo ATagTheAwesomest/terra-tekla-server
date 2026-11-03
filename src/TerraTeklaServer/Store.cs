@@ -44,7 +44,7 @@ public sealed class Store
         connectionString = new SqliteConnectionStringBuilder { DataSource = settings.DatabasePath, Pooling = true }.ToString();
         using var db = Open();
         Exec(db, Schema);
-        MigrateDeviceNumbers(db);
+        AddDeviceNumbers(db);
         AddColumn(db, "stacks", "pallet", "TEXT");
         AddColumn(db, "check_scans", "qty", "INTEGER NOT NULL DEFAULT 1");
         AddColumn(db, "photos", "device_number", "INTEGER");
@@ -93,9 +93,9 @@ public sealed class Store
         CREATE INDEX IF NOT EXISTS photos_load ON photos (job, load_number);
         """;
 
-    // Databases from before device numbers: add the column and number the devices in the order they
-    // were first seen.
-    static void MigrateDeviceNumbers(SqliteConnection db)
+    // Every device has a fixed number ("User 3"): makes sure the column is there and numbers any device
+    // without one, in the order they were first seen.
+    static void AddDeviceNumbers(SqliteConnection db)
     {
         var columns = Rows(db, "PRAGMA table_info(devices)", r => r.GetString(1));
         if (!columns.Contains("number"))
@@ -106,7 +106,7 @@ public sealed class Store
         Exec(db, "CREATE UNIQUE INDEX IF NOT EXISTS devices_number ON devices (number)");
     }
 
-    // A column added after the first release, for databases made before it.
+    // Adds a column if the database doesn't have it yet.
     static void AddColumn(SqliteConnection db, string table, string column, string type)
     {
         if (!Rows(db, $"PRAGMA table_info({table})", r => r.GetString(1)).Contains(column))
