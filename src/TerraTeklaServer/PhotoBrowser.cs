@@ -6,6 +6,9 @@ public sealed record PhotoJob(string Job, string Description, int Loads, int Pho
 /// <summary>A load that has photos.</summary>
 public sealed record PhotoLoad(string Load, int Photos, DateTime? LastAt, string Folder);
 
+/// <summary>One photo in the newest-first list: when it was taken (the iPad's time from the database, else the file's time).</summary>
+public sealed record PhotoAny(string Job, string Load, string Folder, SavedFile File, PhotoMeta? Meta, DateTime TakenAt);
+
 /// <summary>
 /// The photo explorer: which jobs and loads have photos, read from the photo folders themselves, so
 /// photos from before this server (or copied in by hand) show too. A job is looked for when PowerFab
@@ -22,13 +25,54 @@ public sealed class PhotoBrowser(PhotoStore photos, Store store, ILogger<PhotoBr
 
     readonly SemaphoreSlim gate = new(1, 1);
     (DateTime At, List<PhotoJob> Jobs)? overview;
+    (DateTime At, List<PhotoAny> Photos)? newest;
     (DateTime Until, Dictionary<string, string> Jobs)? powerFab; // job -> description
 
     /// <summary>Set at startup: reads PowerFab's job list (number, description), or null when it can't.</summary>
     public Func<CancellationToken, Task<List<(string Number, string Description)>?>>? ReadPowerFabJobs { get; set; }
 
     /// <summary>Forget the overview (a photo was taken or deleted).</summary>
-    public void Changed() => overview = null;
+    public void Changed() => (overview, newest) = (null, null);
+
+    /// <summary>
+    /// Every photo in every job's load folders, the most recently taken first. Photos the database
+    /// knows are dated by when the iPad took them; others (copied in by hand, from before this
+    /// server) by the file's own time. Kept as long as the job overview.
+    /// </summary>
+    public async Task<List<PhotoAny>> NewestAsync(CancellationToken ct)
+    {
+        if (newest is { } n && DateTime.UtcNow - n.At < OverviewFor)
+            return n.Photos;
+        var jobs = await JobsAsync(ct);
+        var meta = store.AllPhotos();
+        var all = new List<PhotoAny>();
+        foreach (var job in jobs)
+        {
+            foreach (var load in Loads(job.Job))
+            {
+                ct.ThrowIfCancellationRequested();
+                IReadOnlyList<SavedFile> files;
+                try
+                {
+                    files = photos.List(job.Job, load.Load);
+                }
+                catch (Exception ex) when (ex is BadNameException or PhotoRulesException or IOException or UnauthorizedAccessException)
+                {
+                    continue;
+                }
+                foreach (var f in files)
+                {
+                    meta.TryGetValue($"{job.Job}|{load.Load}|{f.Name}", out var m);
+                    var at = m is not null && DateTime.TryParse(m.TakenAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var t)
+                        ? t.ToUniversalTime() : f.Modified;
+                    all.Add(new PhotoAny(job.Job, load.Load, load.Folder, f, m, at));
+                }
+            }
+        }
+        all.Sort((a, b) => b.TakenAt != a.TakenAt ? b.TakenAt.CompareTo(a.TakenAt) : string.CompareOrdinal(b.File.Name, a.File.Name));
+        newest = (DateTime.UtcNow, all);
+        return all;
+    }
 
     public async Task<List<PhotoJob>> JobsAsync(CancellationToken ct)
     {

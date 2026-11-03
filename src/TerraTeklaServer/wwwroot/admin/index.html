@@ -54,9 +54,20 @@
     </div>
   </dialog>
 
-  <dialog id="dlg-photo" class="photo-dialog">
-    <div class="photo-head"><span id="photo-title"></span><button class="btn" type="button" id="btn-photo-close">Close</button></div>
-    <img id="photo-img" alt="">
+  <!-- The photo viewer: the same as the iPads' (big picture, what, who, when; arrows, swipe or the
+       keyboard's arrow keys step through the photos it was opened from), plus hold-to-delete. -->
+  <dialog id="dlg-photo" class="photo-dialog" aria-label="Photo">
+    <div class="photo-head">
+      <div><div id="photo-title"></div><div class="muted" id="photo-meta"></div></div>
+      <button class="btn" type="button" id="btn-photo-close">Close</button>
+    </div>
+    <div class="photo-stage" id="photo-stage"><img id="photo-img" alt=""></div>
+    <div class="photo-foot">
+      <button class="btn btn-lg" type="button" id="photo-prev" aria-label="Newer photo">&#9664;</button>
+      <span class="muted" id="photo-count"></span>
+      <button class="btn btn-lg" type="button" id="photo-next" aria-label="Older photo">&#9654;</button>
+      <button class="btn danger hold photo-delete" type="button" data-photo-delete style="--hold-ms:1000ms"><span>Hold to delete</span></button>
+    </div>
   </dialog>
 </body>
 </html>

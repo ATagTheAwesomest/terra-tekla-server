@@ -221,4 +221,57 @@ public sealed class PhotoBrowseTests : IDisposable
         var text = System.Text.Encoding.Latin1.GetString(await File.ReadAllBytesAsync(Directory.GetFiles(Path.Combine(PhotoRoot, "1001", "8")).Single()));
         Assert.Contains(taken.ToLocalTime().ToString("yyyy:MM:dd HH:mm:ss"), text);
     }
+
+    static async Task UploadTaken(HttpClient client, string job, string load, DateTime taken, string? mark = null)
+    {
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent(Jpeg), "file", "p.jpg");
+        form.Add(new StringContent(taken.ToString("o")), "takenAt");
+        if (mark is not null)
+            form.Add(new StringContent(mark), "mark");
+        Assert.Equal(HttpStatusCode.Created, (await client.PostAsync($"/api/photos/{job}/{load}", form)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Newest_lists_every_photo_by_when_it_was_taken_a_page_at_a_time()
+    {
+        var server = Server();
+        var ipad = Keyed(server);
+        // Uploaded in this order, but taken: 1002/3 an hour ago, 1001/8 two days ago.
+        await UploadTaken(ipad, "1002", "3", DateTime.UtcNow.AddHours(-1), "1002-B1");
+        await UploadTaken(ipad, "1001", "8", DateTime.UtcNow.AddDays(-2));
+        // One copied in by hand: dated by the file, a day ago.
+        Directory.CreateDirectory(Path.Combine(PhotoRoot, "1003", "5"));
+        var old = Path.Combine(PhotoRoot, "1003", "5", "old.jpg");
+        await File.WriteAllBytesAsync(old, Jpeg);
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddDays(-1));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await server.CreateClient().GetAsync("/api/photos/newest")).StatusCode);
+
+        var all = await ipad.GetFromJsonAsync<JsonObject>("/api/photos/newest");
+        Assert.Equal(3, (int)all!["total"]!);
+        var photos = all["photos"]!.AsArray();
+        Assert.Equal(["1002", "1003", "1001"], photos.Select(p => (string)p!["job"]!));
+        Assert.Equal("1002-B1", (string?)photos[0]!["mark"]);
+        Assert.Equal("old.jpg", (string)photos[1]!["name"]!);
+        Assert.NotNull(photos[0]!["by"]);
+        Assert.True((DateTime)photos[0]!["takenAt"]! > (DateTime)photos[1]!["takenAt"]!);
+
+        var second = await ipad.GetFromJsonAsync<JsonObject>("/api/photos/newest?limit=1&offset=1");
+        Assert.Equal("old.jpg", (string)second!["photos"]!.AsArray().Single()!["name"]!);
+        Assert.Equal(3, (int)second["total"]!);
+
+        // The device page's recent photos go by when they were taken too.
+        var recent = await ipad.GetFromJsonAsync<JsonArray>("/api/photos/recent");
+        Assert.Equal(["1002", "1001"], recent!.Select(p => (string)p!["job"]!));
+
+        // A deleted photo drops out at once.
+        var code = File.ReadAllText(AdminLock.CodeFilePath(dataDir)).Split('\n')[0].Trim();
+        var unlocked = await ipad.PostAsJsonAsync("/api/admin/unlock", new { pin = code });
+        var token = (string)(await unlocked.Content.ReadFromJsonAsync<JsonObject>())!["token"]!;
+        var first = (string)photos[0]!["name"]!;
+        Assert.Equal(HttpStatusCode.OK, (await Keyed(server, token).DeleteAsync($"/api/admin/photos/1002/3/{Uri.EscapeDataString(first)}")).StatusCode);
+        var after = await ipad.GetFromJsonAsync<JsonObject>("/api/photos/newest");
+        Assert.Equal(["1003", "1001"], after!["photos"]!.AsArray().Select(p => (string)p!["job"]!));
+    }
 }

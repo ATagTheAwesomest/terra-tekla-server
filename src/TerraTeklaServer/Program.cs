@@ -200,10 +200,12 @@ browse.MapGet("/{job}/{load}", (string job, string load, HttpContext http) => Ph
             name = f.Name,
             bytes = f.Bytes,
             modified = f.Modified,
+            takenAt = m?.TakenAt,
             mark = m?.Mark,
             by = who.By,
             user = who.User,
             byGuess = who.Guess,
+            byId = keyed ? m?.DeviceId : null,
             color = who.Color,
             path = keyed ? Path.Combine(folder, f.Name) : null,
         };
@@ -607,6 +609,35 @@ api.MapGet("/photos/recent", (string? device, int? limit) => settings.Photos.Ena
     }))
     : PhotosDisabled());
 
+// Every photo in the photo folders, the most recently taken first (the admin board's "Newest"
+// view), a page at a time: ?limit= (1-200, default 60) and ?offset=.
+api.MapGet("/photos/newest", (int? limit, int? offset, CancellationToken ct) => PhotosAsync(async () =>
+{
+    var all = await browser.NewestAsync(ct);
+    var devices = store.Devices().ToDictionary(d => d.Id);
+    var skip = Math.Max(0, offset ?? 0);
+    var page = all.Skip(skip).Take(Math.Clamp(limit ?? 60, 1, 200)).Select(p =>
+    {
+        var who = PhotoWho(p.Meta, devices, p.Folder, p.File.Name);
+        return new
+        {
+            job = p.Job,
+            load = p.Load,
+            name = p.File.Name,
+            bytes = p.File.Bytes,
+            modified = p.File.Modified,
+            takenAt = p.TakenAt,
+            mark = p.Meta?.Mark,
+            by = who.By,
+            user = who.User,
+            byGuess = who.Guess,
+            byId = p.Meta?.DeviceId,
+            color = who.Color,
+        };
+    }).ToList();
+    return Results.Json(new { total = all.Count, offset = skip, photos = page });
+}));
+
 api.MapGet("/photos/{job}/{load}", (string job, string load) => PhotosAsync(() =>
 {
     var meta = store.Photos(job, load);
@@ -692,7 +723,7 @@ api.MapPost("/photos/{job}/{load}", async (string job, string load, HttpContext 
             await using var s = uploads[i].OpenReadStream();
             var tag = new PhotoTag(me.User, me.Name, me.Id, job, load, mark == "" ? null : mark, takenAt);
             var name = await photos.SaveAsync(job, load, mark, types[i], s, ct, tag);
-            store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length);
+            store.AddPhoto(job, load, name, mark == "" ? null : mark, me, uploads[i].Length, takenAt);
             saved.Add(new { name, bytes = uploads[i].Length });
         }
         browser.Changed();

@@ -245,27 +245,54 @@ function moreButton(items, limit) {
   return items.length >= limit ? `<button class="btn more" type="button" data-more="${items.at(-1).id}">Show older</button>` : '';
 }
 
+// Each grid drawn keeps its list, so the big viewer can step through the photos it was opened from.
+const grids = new Map(); // grid id -> [photo]
+let gridSeq = 0;
+
+const photoJob = (p) => p.job;
+const photoLoad = (p) => p.load ?? p.loadNumber;
+const photoName = (p) => p.name ?? p.fileName;
+const photoId = (p) => `${photoJob(p)}|${photoLoad(p)}|${photoName(p)}`;
+const photoWhen = (p) => p.takenAt ?? p.modified;
+
+// A press-and-hold delete button: nothing happens on a tap, the photo goes after HOLD_MS held.
+const HOLD_MS = 1000;
+function holdDelete(label = 'Hold to delete') {
+  return `<button class="btn btn-small danger hold" type="button" data-photo-delete style="--hold-ms:${HOLD_MS}ms"><span>${label}</span></button>`;
+}
+
 async function photoGrid(list, { empty = 'No photos.', deletable = false } = {}) {
   if (!list.length) return `<p class="muted">${empty}</p>`;
-  return `<div class="photos">${list.map((p) => `
-    <figure class="photo" style="--c:${esc(deviceOf(p.byId ?? p.deviceId)?.color ?? p.color ?? '#555')}" data-photo="${esc(`${p.job}|${p.load ?? p.loadNumber}|${p.name ?? p.fileName}`)}">
+  const id = `g${++gridSeq}`;
+  grids.set(id, list.slice());
+  return `<div class="photos" data-grid="${id}">${list.map((p, i) => `
+    <figure class="photo" style="--c:${esc(deviceOf(p.byId ?? p.deviceId)?.color ?? p.color ?? '#555')}" data-photo="${esc(photoId(p))}" data-i="${i}">
       <button type="button" data-photo-open aria-label="View photo"><img alt=""></button>
       <figcaption class="cap">${esc(p.mark || 'Whole load')}
-        <span>${photoWho(p)} · ${p.job ? `<a href="#/job/${enc(p.job)}">${esc(p.job)}</a> load ${esc(p.load ?? p.loadNumber)}` : ''}</span>
-        <span>${esc(when(p.modified ?? p.takenAt))}</span>
-        ${deletable ? `<span class="path">${esc(p.name ?? p.fileName)}</span><button class="btn btn-small danger" type="button" data-photo-delete>Delete</button>` : ''}</figcaption>
+        <span>${photoWho(p)} · ${p.job ? `<a href="#/photos/${enc(p.job)}">${esc(p.job)}</a> <a href="#/photos/${enc(p.job)}/${enc(photoLoad(p))}">load ${esc(photoLoad(p))}</a>` : ''}</span>
+        <span title="${esc(new Date(photoWhen(p)).toLocaleString())}">${esc(when(photoWhen(p)))}</span>
+        ${deletable ? `<span class="path">${esc(photoName(p))}</span>${holdDelete()}` : ''}</figcaption>
     </figure>`).join('')}</div>`;
 }
 
-// Fills the pictures in after the grid is drawn.
+// Fills the pictures in after the grid is drawn, as each comes near the screen (a long newest-first
+// list doesn't fetch every photo at once).
+let photoSeen = null;
 function fillPhotos() {
-  for (const fig of document.querySelectorAll('[data-photo]')) {
+  photoSeen?.disconnect();
+  const show = (fig) => {
     const [job, load, name] = fig.dataset.photo.split('|');
     photoUrl(job, load, name).then((url) => {
       const img = fig.querySelector('img');
       if (img && url) img.src = url;
     });
-  }
+  };
+  const figs = document.querySelectorAll('#main [data-photo]');
+  if (!('IntersectionObserver' in window)) { figs.forEach(show); return; }
+  photoSeen = new IntersectionObserver((seen) => {
+    for (const e of seen) if (e.isIntersecting) { photoSeen.unobserve(e.target); show(e.target); }
+  }, { rootMargin: '600px 0px' });
+  figs.forEach((f) => photoSeen.observe(f));
 }
 
 // ---- Pages ----------------------------------------------------------------------------
@@ -458,19 +485,28 @@ async function pageMark(mark, query) {
 }
 
 // Photos: every job with photos › its loads › the photos, read from the photo folders (so photos
-// put there by hand or from before this server show too). Deleting is here only.
+// put there by hand or from before this server show too), or every photo the most recently taken
+// first. Tap a photo for the big viewer (the same as the iPads': arrows step through). Deleting is
+// on this board only: hold the button for a second (the admin code is already in, or is asked for).
 let photoJobFilter = '';
+const NEWEST_PAGE = 60;
+let newestShown = NEWEST_PAGE;
 
-async function pagePhotos([job, load] = []) {
+function photoTabs(active) {
+  return `<div class="tabs"><a href="#/photos" class="${active === 'jobs' ? 'active' : ''}">By job</a><a href="#/photos?view=newest" class="${active === 'newest' ? 'active' : ''}">Newest first</a></div>`;
+}
+
+async function pagePhotos([job, load] = [], query = new URLSearchParams()) {
   if (!health) await refreshHealth();
   if (!health?.photosEnabled) return '<section class="panel"><h2>Photos</h2><p class="muted">Photos are off on this server (PHOTOS_ENABLED). See Docs › Photos.</p></section>';
+  const holdNote = 'Tap a photo to see it big. To delete, hold <b>Hold to delete</b> for a second: the photo moves into its load’s <code>.deleted</code> folder, so it can be put back by hand.';
   if (job && load) {
     const r = await api(`/browse/${enc(job)}/${enc(load)}`);
     const files = r.files.slice().reverse().map((f) => ({ ...f, job, load }));
     return `<p class="crumbs"><a href="#/photos">Photos</a> › <a href="#/photos/${enc(job)}">${esc(job)}</a> › Load ${esc(load)}</p>
       <section class="panel"><h2>Job ${esc(job)} · load ${esc(load)} <span class="muted">· ${files.length} photo${files.length === 1 ? '' : 's'}</span></h2>
         <p class="muted path">Stored in ${esc(r.folder ?? '')}</p>
-        <p class="muted">Delete moves a photo into the load’s <code>.deleted</code> folder, so it can be put back by hand. <a href="#/job/${enc(job)}">Job ${esc(job)}’s loads and stacks ›</a></p>
+        <p class="muted">${holdNote} <a href="#/job/${enc(job)}">Job ${esc(job)}’s loads and stacks ›</a></p>
         ${await photoGrid(files, { empty: 'No photos of this load.', deletable: true })}</section>`;
   }
   if (job) {
@@ -482,15 +518,25 @@ async function pagePhotos([job, load] = []) {
           ${r.loads.map((l) => `<tr><td><a href="#/photos/${enc(job)}/${enc(l.load)}"><b>Load ${esc(l.load)}</b></a></td><td class="num">${num(l.photos)}</td><td>${l.lastAt ? esc(ago(l.lastAt)) : ''}</td><td class="path">${esc(l.folder ?? '')}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No photos for this job.</p>'}</section>`;
   }
-  const [r, recent] = await Promise.all([api('/browse'), api('/photos/recent?limit=24')]);
-  return `<section class="panel"><h2>Photos <span class="muted">· ${r.jobs.length} job${r.jobs.length === 1 ? '' : 's'}</span></h2>
+  if (query.get('view') === 'newest') {
+    const r = await api(`/photos/newest?limit=${newestShown}`);
+    return `${photoTabs('newest')}
+      <section class="panel"><h2>Newest photos <span class="muted">· ${num(r.total)} in all</span></h2>
+        <p class="muted">Every photo in every job’s folder, the most recently taken first (by when the iPad took it; photos copied in by hand by the file’s date). ${holdNote}</p>
+        ${await photoGrid(r.photos, { empty: 'No photos yet.', deletable: true })}
+        ${r.photos.length < r.total ? `<p><button class="btn more" type="button" data-newest-more>Show ${num(Math.min(NEWEST_PAGE, r.total - r.photos.length))} more (${num(r.photos.length)} of ${num(r.total)} shown)</button></p>` : ''}
+      </section>`;
+  }
+  const [r, recent] = await Promise.all([api('/browse'), api('/photos/newest?limit=24')]);
+  return `${photoTabs('jobs')}
+    <section class="panel"><h2>Photos <span class="muted">· ${r.jobs.length} job${r.jobs.length === 1 ? '' : 's'}</span></h2>
       <p class="muted">Every job with photos in its folder. Pick one, then a load. The iPads have the same explorer (home screen › Photos), look only.</p>
       <input class="filter" type="search" id="photo-job-filter" placeholder="Filter jobs" value="${esc(photoJobFilter)}" autocomplete="off">
       ${r.jobs.length ? `<div style="overflow-x:auto"><table id="photo-jobs-table"><thead><tr><th>Job</th><th>Description</th><th class="num">Loads</th><th class="num">Photos</th><th>Last photo</th><th>Folder</th></tr></thead><tbody>
         ${r.jobs.map((j) => `<tr data-search="${esc(`${j.job} ${j.description}`.toLowerCase())}"><td><a href="#/photos/${enc(j.job)}"><b>${esc(j.job)}</b></a></td><td>${esc(j.description)}</td><td class="num">${num(j.loads)}</td><td class="num">${num(j.photos)}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td><td class="path">${esc(j.folder ?? '')}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">No photos yet.</p>'}
     </section>
-    <section class="panel"><h2>Recent photos</h2>${await photoGrid(recent)}</section>`;
+    <section class="panel"><h2>Latest taken <span class="muted">· <a href="#/photos?view=newest">all, newest first ›</a></span></h2>${await photoGrid(recent.photos, { deletable: true })}</section>`;
 }
 
 function filterPhotoJobs() {
@@ -498,16 +544,129 @@ function filterPhotoJobs() {
   document.querySelectorAll('#photo-jobs-table tbody tr').forEach((tr) => { tr.hidden = q && !tr.dataset.search.includes(q); });
 }
 
-async function deletePhoto(fig) {
-  const [job, load, name] = fig.dataset.photo.split('|');
-  if (!window.confirm(`Delete ${name}?\n\nIt moves into the load’s .deleted folder on the server.`)) return;
+// ---- Photo viewer (like the iPads': big picture, who and when, arrows step through the grid) ----
+
+const viewer = { list: [], i: 0, deleted: false };
+
+async function openViewer(gridId, i) {
+  viewer.list = grids.get(gridId) ?? [];
+  viewer.i = i;
+  viewer.deleted = false;
+  if (!$('#dlg-photo').open) $('#dlg-photo').showModal();
+  drawViewer();
+}
+
+function closeViewer() {
+  $('#dlg-photo').close();
+}
+
+async function drawViewer() {
+  const p = viewer.list[viewer.i];
+  if (!p) { closeViewer(); return; }
+  const [job, load, name] = [photoJob(p), photoLoad(p), photoName(p)];
+  $('#photo-title').innerHTML = `<b>${esc(p.mark || 'Whole load')}</b> · <a href="#/photos/${enc(job)}" data-viewer-link>Job ${esc(job)}</a> · <a href="#/photos/${enc(job)}/${enc(load)}" data-viewer-link>load ${esc(load)}</a>`;
+  $('#photo-meta').innerHTML = [`Taken by ${photoWho(p)}`, esc(new Date(photoWhen(p)).toLocaleString()), p.bytes ? esc(bytes(p.bytes)) : '', `<span class="path">${esc(name)}</span>`].filter(Boolean).join(' · ');
+  $('#photo-count').textContent = `${viewer.i + 1} of ${viewer.list.length}`;
+  $('#photo-prev').disabled = viewer.i === 0;
+  $('#photo-next').disabled = viewer.i === viewer.list.length - 1;
+  const img = $('#photo-img');
+  img.removeAttribute('src');
+  img.alt = name;
+  const url = await photoUrl(job, load, name);
+  if (viewer.list[viewer.i] === p) img.src = url;
+  // The next one is fetched ahead, so stepping is quick.
+  const next = viewer.list[viewer.i + 1];
+  if (next) photoUrl(photoJob(next), photoLoad(next), photoName(next));
+}
+
+function stepViewer(by) {
+  const i = viewer.i + by;
+  if (i < 0 || i >= viewer.list.length) return;
+  viewer.i = i;
+  drawViewer();
+}
+
+// Deletes one photo (the hold is the confirmation). Locked: asks for the admin code, then goes on.
+async function deletePhoto(id) {
+  const [job, load, name] = id.split('|');
   try {
     await api(`/admin/photos/${enc(job)}/${enc(load)}/${enc(name)}`, { method: 'DELETE' });
-    fig.remove();
   } catch (err) {
-    if (err.problem?.locked) { if (await unlock()) deletePhoto(fig); return; }
+    if (err.problem?.locked) { if (await unlock()) deletePhoto(id); return; }
     window.alert(err.message);
+    return;
   }
+  const url = photoUrls.get(`${job}/${load}/${name}`);
+  if (url) URL.revokeObjectURL(url);
+  photoUrls.delete(`${job}/${load}/${name}`);
+  document.querySelectorAll('#main [data-photo]').forEach((f) => { if (f.dataset.photo === id) f.remove(); });
+  for (const list of grids.values()) {
+    const at = list.findIndex((p) => photoId(p) === id);
+    if (at >= 0) list.splice(at, 1);
+  }
+  if ($('#dlg-photo').open) {
+    viewer.deleted = true;
+    if (viewer.i >= viewer.list.length) viewer.i = viewer.list.length - 1;
+    if (viewer.list.length) drawViewer(); else closeViewer();
+  }
+}
+
+// Press and hold: the button fills over HOLD_MS, and the photo is deleted when it is full. Lifting
+// the finger (or sliding off) early does nothing; a plain tap says to hold.
+let holding = null; // { btn, timer }
+
+const holdLabel = (btn, text) => { const l = btn.querySelector('span'); if (l) l.textContent = text; };
+
+function startHold(btn) {
+  stopHold();
+  clearTimeout(btn.hint);
+  holdLabel(btn, 'Keep holding…');
+  btn.classList.add('holding');
+  holding = {
+    btn,
+    timer: setTimeout(() => {
+      holding = null;
+      btn.classList.remove('holding');
+      holdLabel(btn, 'Hold to delete');
+      btn.dataset.held = String(Date.now());
+      const id = btn.closest('[data-photo]')?.dataset.photo ?? (viewer.list[viewer.i] && photoId(viewer.list[viewer.i]));
+      if (id) deletePhoto(id);
+    }, HOLD_MS),
+  };
+}
+
+function stopHold() {
+  if (!holding) return;
+  clearTimeout(holding.timer);
+  holding.btn.classList.remove('holding');
+  const btn = holding.btn;
+  btn.hint = setTimeout(() => holdLabel(btn, 'Hold to delete'), 1500);
+  holding = null;
+}
+
+function bindHold(root) {
+  root.addEventListener('pointerdown', (e) => {
+    const btn = e.target.closest('[data-photo-delete]');
+    if (btn && e.button === 0) startHold(btn);
+  });
+  root.addEventListener('pointerup', stopHold);
+  root.addEventListener('pointercancel', stopHold);
+  root.addEventListener('pointerout', (e) => { if (holding && e.target.closest?.('[data-photo-delete]') === holding.btn && !holding.btn.contains(e.relatedTarget)) stopHold(); });
+  root.addEventListener('contextmenu', (e) => { if (e.target.closest('[data-photo-delete]')) e.preventDefault(); });
+  // A keyboard hold: Space or Enter held down.
+  root.addEventListener('keydown', (e) => {
+    const btn = e.target.closest?.('[data-photo-delete]');
+    if (btn && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); if (!e.repeat) startHold(btn); }
+  });
+  root.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') stopHold(); });
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-photo-delete]');
+    if (!btn) return;
+    e.preventDefault();
+    if (Date.now() - Number(btn.dataset.held || 0) < 800) return;
+    // A tap: say to hold (stopHold has already set the label back in a moment).
+    holdLabel(btn, 'Hold for 1 second');
+  });
 }
 
 // ---- Admin code -------------------------------------------------------------------------
@@ -1079,6 +1238,8 @@ async function draw() {
   const query = new URLSearchParams(qs ?? '');
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active',
     a.dataset.nav === (page === '' || page === 'device' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
+  if (redrawReason === 'nav') newestShown = NEWEST_PAGE; // "Show more" stays through live redraws only
+  grids.clear();
   currentPage = page;
   try {
     const html = await locked('The admin board', () => page === 'device' ? pageDevice(arg)
@@ -1088,7 +1249,7 @@ async function draw() {
       : page === 'job' ? pageJob(arg)
       : page === 'load' ? pageLoad(arg, query)
       : page === 'mark' ? pageMark(arg, query)
-      : page === 'photos' ? pagePhotos(rest.map(decodeURIComponent))
+      : page === 'photos' ? pagePhotos(rest.map(decodeURIComponent), query)
       : page === 'docs' ? pageDocs(arg || 'setup')
       : pageHome());
     if (seq !== drawing) return;
@@ -1302,20 +1463,38 @@ function bind() {
       more.remove();
       if (older.length >= 100) document.querySelector('[data-feed]').parentElement.insertAdjacentHTML('beforeend', moreButton(older, 100));
     }
-    const del = e.target.closest('[data-photo-delete]');
-    if (del) { deletePhoto(del.closest('[data-photo]')); return; }
+    if (e.target.closest('[data-newest-more]')) { newestShown += NEWEST_PAGE; redrawReason = 'live'; draw(); return; }
     const open = e.target.closest('[data-photo-open]');
     if (open) {
-      const [job, load, name] = open.closest('[data-photo]').dataset.photo.split('|');
-      $('#photo-title').textContent = `${job} · load ${load} · ${name}`;
-      $('#photo-img').src = await photoUrl(job, load, name);
-      $('#dlg-photo').showModal();
+      const fig = open.closest('[data-photo]');
+      openViewer(fig.closest('[data-grid]')?.dataset.grid, Number(fig.dataset.i));
     }
   });
   $('#main').addEventListener('change', (e) => {
     if (e.target.matches('[data-color-pick]')) saveDevice($('#form-device'), { color: e.target.value });
   });
-  $('#btn-photo-close').addEventListener('click', () => $('#dlg-photo').close());
+  const dlg = $('#dlg-photo');
+  bindHold($('#main'));
+  bindHold(dlg);
+  $('#btn-photo-close').addEventListener('click', closeViewer);
+  $('#photo-prev').addEventListener('click', () => stepViewer(-1));
+  $('#photo-next').addEventListener('click', () => stepViewer(1));
+  dlg.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft') stepViewer(-1);
+    if (e.key === 'ArrowRight') stepViewer(1);
+  });
+  dlg.addEventListener('click', (e) => { if (e.target.closest('[data-viewer-link]')) closeViewer(); });
+  // Swipe left or right on the picture to step.
+  let swipe = null;
+  $('#photo-stage').addEventListener('pointerdown', (e) => { swipe = { x: e.clientX, y: e.clientY }; });
+  $('#photo-stage').addEventListener('pointerup', (e) => {
+    if (!swipe) return;
+    const dx = e.clientX - swipe.x;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(e.clientY - swipe.y)) stepViewer(dx < 0 ? 1 : -1);
+    swipe = null;
+  });
+  // After deleting from the viewer, the page underneath catches up once it closes.
+  dlg.addEventListener('close', () => { stopHold(); if (viewer.deleted) { viewer.deleted = false; redrawSoon(); } });
   $('#btn-lock').addEventListener('click', lockNow);
 
   const pin = $('#dlg-pin');

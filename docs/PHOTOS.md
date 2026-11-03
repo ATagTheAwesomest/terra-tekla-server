@@ -139,11 +139,20 @@ photos › its loads › the photos, newest first.
 - Without the key (on by default, `PHOTOS_PUBLIC`) it is look only. With the key it also shows
   where each job, load and photo is stored. Deleting is on the admin board only, behind the admin code.
 
+On the admin board the Photos tab also has **Newest first**: every photo in every job's folder, the
+most recently taken first, 60 at a time. Photos the server saved are dated by when the iPad took
+them (an iPad that was offline sends them later; they still go in at the time they were taken);
+photos copied in by hand go by the file's date. Tapping a photo opens the same big viewer as the
+iPads (what, who, when; arrows, swipe or the arrow keys step through). To delete, hold **Hold to
+delete** for a second, on a photo or in the viewer: no OK box. The photo moves into its load's
+`.deleted` folder, so it can be put back by hand. When the board is locked it asks for the admin
+code first.
+
 | Method | Path | Answer |
 |---|---|---|
 | GET | `/api/browse` | `{ "keyed", "jobs": [{ "job", "description", "loads", "photos", "lastAt", "folder" }] }`, newest job number first. `folder` only with the key. |
 | GET | `/api/browse/{job}` | `{ "keyed", "job", "folder", "loads": [{ "load", "photos", "lastAt", "folder" }] }` |
-| GET | `/api/browse/{job}/{load}` | `{ "keyed", "job", "load", "folder", "files": [{ "name", "bytes", "modified", "mark", "by", "color", "path" }] }`, oldest first. `folder` and `path` only with the key. |
+| GET | `/api/browse/{job}/{load}` | `{ "keyed", "job", "load", "folder", "files": [{ "name", "bytes", "modified", "takenAt", "mark", "by", "byId", "color", "path" }] }`, oldest first. `folder`, `byId` and `path` only with the key; `takenAt` only for photos the server saved. |
 | GET | `/api/browse/{job}/{load}/{name}` | The photo itself. |
 
 These need no key unless `PHOTOS_PUBLIC` is `false` (then 401 without it); 403 while photos are off.
@@ -155,7 +164,8 @@ All need `Authorization: Bearer <ACCESS_KEY>`. Errors are JSON problem details w
 | Method | Path | Answer |
 |---|---|---|
 | GET | `/api/photos` | `{ "enabled": true, "maxBytes": 26214400, "maxFiles": 20, "types": ["jpg", ...] }`. Works when off (enabled false). |
-| GET | `/api/photos/recent?device=&limit=` | The newest photos across all loads (optionally one iPad's), from the database: `[{ "id", "job", "loadNumber", "fileName", "mark", "deviceId", "deviceName", "bytes", "takenAt" }]`. |
+| GET | `/api/photos/recent?device=&limit=` | The most recently taken photos across all loads (optionally one iPad's), from the database: `[{ "id", "job", "loadNumber", "fileName", "mark", "deviceId", "deviceName", "bytes", "takenAt" }]`. |
+| GET | `/api/photos/newest?limit=&offset=` | Every photo in the photo folders (hand-copied ones too), the most recently taken first, a page at a time (`limit` 1-200, default 60): `{ "total", "offset", "photos": [{ "job", "load", "name", "bytes", "modified", "takenAt", "mark", "by", "user", "byGuess", "byId", "color" }] }`. `takenAt` is when the iPad took it, or the file's date for photos the server didn't save. |
 | GET | `/api/photos/{job}/{load}` | `{ "job", "load", "files": [{ "name", "bytes", "modified", "mark", "by", "byId", "color" }] }`, oldest first. `by` is the iPad's current name. Empty list if the folder doesn't exist yet. Photos put in the folder by hand show up too, without `mark`/`by`. |
 | POST | `/api/photos/{job}/{load}` | `multipart/form-data`: one or more `file` fields, optional `mark` field (the piece the photos are of; left out = the whole load). Needs `X-Terra-Device`. 201 `{ "job", "load", "saved": [{ "name", "bytes" }] }`. |
 | GET | `/api/photos/{job}/{load}/{name}` | The photo itself, with its type (`image/jpeg`...). `{name}` is a name from the list. |
