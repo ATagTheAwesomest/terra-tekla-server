@@ -34,14 +34,10 @@ and the admin board then go by the TERRA tag in the file, else by the iPad name 
 old-style file name (shown as "probably"), else "unknown".
 
 Photos are off until `PHOTOS_ENABLED` is turned on. The app has its own switch too (Server settings,
-"Send photos to the server"), off until turned on on each iPad.
+"Send photos to the server"), on unless turned off on that iPad.
 
 This file ships next to `TerraTeklaServer.exe` as `PHOTOS.md` and is shown on the admin page
 (Docs > Photos), so it always matches the running build.
-
-> Photos used to be saved by tekla-conversion-layer (`FILES_*` settings). That moved here: the
-> conversion layer is only a PowerFab converter now. Rename `FILES_*` keys to `PHOTOS_*` and
-> `file-rules.json` to `photo-rules.json`; the folder rules work exactly the same.
 
 ## Turning it on (startup options)
 
