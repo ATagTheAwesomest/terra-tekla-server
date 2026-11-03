@@ -362,7 +362,7 @@ All carry `op`, `opId` (unique, made by the app), `job` and `loadNumber`. Ids (`
 piece (bolts, clips, plates on a pallet). It still has one row per piece, so totals, weight (unit
 weight × quantity), the sync with PowerFab, the export and the truck check all work as for any stack;
 the app and the admin board show it as one line, "mark × quantity". The stack's `pallet` holds the
-mark, how many photos of it were taken when it was made (the app asks for at least 3), and whether
+mark, how many photos of it were taken when it was made (the app asks for 2), and whether
 the mark was typed. A pallet only takes its own mark: a `beginScan` or `moveEntryTo` of another mark
 into it is refused, and pieces PowerFab loaded by itself never go into one. At most 2000 rows per
 operation.
