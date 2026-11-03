@@ -13,8 +13,8 @@ D:\TerraPhotos\EPM-001\Load 8\2026.10.28_14.36.11_1001-C1.jpg
 \\fileserver\Jobs\2026\26101\Photos\Load 3\2026.10.28_15.00.12_load (2).jpg
 ```
 
-Photos saved by older versions are named `20261028-143611_1001-C1_Yard iPad.jpg` (the iPad name at
-the end). They are left as they are, and the app, the explorer and the admin board read both styles.
+Files named the other way, `20261028-143611_1001-C1_Yard iPad.jpg` (the iPad name at the end), are
+read too by the app, the explorer and the admin board.
 
 The server also keeps a record of each photo in its database (piece, iPad and its fixed "User N",
 size, time), so the app and the admin page can show who took it even after the iPad is renamed.
@@ -29,9 +29,9 @@ XPComment) and XMP (`dc:creator`, `dc:description`, `xmp:CreateDate`, and `terra
 if the photo doesn't have one already: nothing a camera wrote is changed. PNG, HEIC, WebP and PDF
 files are saved as sent (the database still records who took them).
 
-Photos from before this, or copied into a load folder by hand, have no database record: the explorer
-and the admin board then go by the TERRA tag in the file, else by the iPad name at the end of an
-old-style file name (shown as "probably"), else "unknown".
+Photos copied into a load folder by hand have no database record: the explorer
+and the admin board then go by the TERRA tag in the file, else by the iPad name at the end of a
+file name in the other style (shown as "probably"), else "unknown".
 
 Photos are off until `PHOTOS_ENABLED` is turned on. The app has its own switch too (Server settings,
 "Send photos to the server"), on unless turned off on that iPad.
@@ -127,8 +127,8 @@ To check a rule without the app, list a load's photos (this creates nothing):
 The app's home screen has a **Photos** tile and the admin board a **Photos** tab: every job with
 photos › its loads › the photos, newest first.
 
-- Jobs are found from the photo folders themselves, so photos from before this server, or copied in
-  by hand, show too. A job is looked for when PowerFab lists it (the list is read at most every 10
+- Jobs are found from the photo folders themselves, so photos copied in by hand show
+  too. A job is looked for when PowerFab lists it (the list is read at most every 10
   minutes), the database has a photo or stack for it, or `PHOTOS_ROOT` has a folder that is that job's
   folder (the default layout). Its loads are the folders in its job folder that fit `loadFolder`
   (`{load}` by default), plus any the database knows. Dot folders such as `.deleted` are left out.

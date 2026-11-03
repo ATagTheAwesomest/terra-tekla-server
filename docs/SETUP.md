@@ -208,9 +208,7 @@ Safari only runs the app's offline cache and "Add to Home Screen" app mode from 
 - **Cloudflare Tunnel**: one public hostname, no path, pointing at `http://localhost:8095`. That
   one hostname serves everything (`/`, `/admin/`, `/api/*`, `/ws`, `/health`). In the Cloudflare
   dashboard keep WebSockets on and Rocket Loader off, and add a cache rule that bypasses the cache
-  for that hostname. Don't put Cloudflare Access in front of it: the installed iPad app, its offline
-  cache and the live connection can't get through an Access login (if you want Access, put it on
-  the path `/admin` only). The conversion layer needs no tunnel: only this server talks to it, on
+  for that hostname. The conversion layer needs no tunnel: only this server talks to it, on
   `127.0.0.1`.
 - **A certificate on this server**: give Kestrel a certificate in `local.settings.json`, e.g.
   ```json

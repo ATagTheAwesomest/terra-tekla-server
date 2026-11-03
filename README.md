@@ -60,8 +60,7 @@ Photos are off until you set `PHOTOS_ENABLED` to `true` and `PHOTOS_ROOT` to a f
 Settings. Restart after editing the file by hand: `Restart-Service TerraTeklaServer`.
 
 **HTTPS (Cloudflare Tunnel):** one public hostname, no path, pointing at `http://localhost:8095`.
-Keep WebSockets on, and don't put Cloudflare Access in front of it (the installed iPad app can't get
-through an Access login). Other options are in [docs/SETUP.md](docs/SETUP.md#https-needed-for-the-ipads).
+Keep WebSockets on. Other options are in [docs/SETUP.md](docs/SETUP.md#https-needed-for-the-ipads).
 
 ## Set up an iPad
 

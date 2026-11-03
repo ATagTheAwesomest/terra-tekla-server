@@ -228,8 +228,8 @@ var api = app.MapGroup("/api").AddEndpointFilter(async (context, next) =>
     return KeyOk(presented) ? await next(context) : Results.Problem("The access key was refused.", statusCode: 401);
 });
 
-// PowerFab, through tekla-conversion-layer. The app sends exactly what it used to send to the
-// conversion layer; this server adds the conversion layer's key, which never leaves the server.
+// PowerFab, through tekla-conversion-layer. The app sends the conversion layer's own request; this
+// server adds the conversion layer's key, which never leaves the server.
 api.MapPost("/powerfab/{command}", async (string command, HttpContext http, IHttpClientFactory factory) =>
 {
     if (settings.ConversionUrl == "")
