@@ -152,8 +152,9 @@ const num = (n) => (Number(n) || 0).toLocaleString('en-US');
 
 const lbs = (n) => `${Math.round(Number(n) || 0).toLocaleString('en-US')} lbs`;
 
+// A device by its id, or by an old id merged into it.
 function deviceOf(id) {
-  return devices.find((d) => d.id === id);
+  return devices.find((d) => d.id === id) ?? devices.find((d) => d.aliases?.includes(id));
 }
 
 // A device name in its colour, linking to its page.
@@ -307,6 +308,7 @@ async function pageHome() {
       <section class="panel">
         <h2>Devices <span class="muted">· ${online} connected</span></h2>
         <div class="devices">${devices.length ? devices.map(deviceCard).join('') : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}</div>
+        ${devices.length > 1 ? '<p class="muted">One iPad listed more than once (Safari and the home screen app, or the app installed again)? Open the extra one and merge it into the one to keep.</p>' : ''}
       </section>
       <section class="panel">
         <h2>Set up an iPad</h2>
@@ -378,6 +380,7 @@ async function pageDevice(id) {
         <p class="muted" id="device-saved"></p>
         <p class="muted">${esc(d.userAgent ?? '')}</p>
       </section>
+      ${mergePanel(d)}
       ${photos.length ? `<section class="panel"><h2>Recent photos</h2>${await photoGrid(photos)}</section>` : ''}
     </div>
     <section class="panel">
@@ -386,6 +389,38 @@ async function pageDevice(id) {
       ${moreButton(items, 100)}
     </section>
   </div>`;
+}
+
+// One iPad can show up as several devices: Safari and the home screen app, and every new install of
+// the app, start with their own storage, so their own device id. Merging puts them back together.
+function mergePanel(d) {
+  const others = devices.filter((x) => x.id !== d.id).sort((a, b) => a.number - b.number);
+  if (!others.length) return '';
+  return `<section class="panel">
+    <h2>Same iPad as another device?</h2>
+    <p class="muted">Safari and the home screen app, or the app installed again, each show up as a new device. Pick the device to keep: ${esc(d.name)}’s scans, stacks, truck checks, history and photos move to it, ${esc(d.name)} goes, and an app still using it carries on as the kept device.</p>
+    <form class="edit" id="form-merge" data-id="${esc(d.id)}" data-name="${esc(d.name)}">
+      <label for="merge-into">Merge ${esc(d.name)} into</label>
+      <select id="merge-into">${others.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}${x.user !== x.name ? ` (${esc(x.user)})` : ''} · ${x.online ? 'connected' : `seen ${esc(ago(x.lastSeenAt))}`}${x.appVersion ? ` · v${esc(x.appVersion)}` : ''}</option>`).join('')}</select>
+      <button class="btn danger" type="submit">Merge</button>
+    </form>
+    <p class="muted" id="merge-result"></p>
+  </section>`;
+}
+
+async function mergeDevice(form) {
+  const into = deviceOf($('#merge-into').value);
+  const out = $('#merge-result');
+  if (!into) return;
+  if (!confirm(`Merge ${form.dataset.name} into ${into.name}? ${form.dataset.name} goes; everything it did becomes ${into.name}’s. This can’t be undone.`)) return;
+  try {
+    if (!adminToken() && !(await unlock())) { out.textContent = 'Not merged: it needs the admin code.'; return; }
+    const kept = await api(`/admin/devices/${enc(form.dataset.id)}/merge`, { method: 'POST', body: { into: into.id } });
+    devices = await api('/devices');
+    location.hash = `#/device/${enc(kept.id)}`;
+  } catch (err) {
+    out.textContent = err.message;
+  }
 }
 
 // Every job PowerFab lets this server reach (the list the iPads pick from), with what the server has
@@ -1349,6 +1384,11 @@ function bind() {
         out.textContent = err.message;
         out.className = 'error';
       }
+      return;
+    }
+    if (e.target.id === 'form-merge') {
+      e.preventDefault();
+      mergeDevice(e.target);
       return;
     }
     if (e.target.id !== 'form-device') return;

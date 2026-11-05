@@ -91,6 +91,9 @@ public sealed class Store
             file_name TEXT NOT NULL, mark TEXT, device_id TEXT, device_name TEXT,
             bytes INTEGER NOT NULL, taken_at TEXT NOT NULL, deleted_at TEXT);
         CREATE INDEX IF NOT EXISTS photos_load ON photos (job, load_number);
+        CREATE TABLE IF NOT EXISTS device_aliases (
+            old_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, merged_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS device_aliases_device ON device_aliases (device_id);
         """;
 
     // Databases from before device numbers: add the column and number the devices in the order they
@@ -323,10 +326,13 @@ public sealed class Store
     /// Records that a device was seen, creating it with a starting name and colour the first time.
     /// Returns it and whether it is new.
     /// </summary>
+    /// An id that was merged into another device (an old install of the same iPad) is that device:
+    /// it is never made again.
     public (Device Device, bool Created) Touch(string id, string? ip, string? userAgent, string? appVersion)
     {
         using var db = Open();
         var now = DateTime.UtcNow.ToString("o");
+        id = Resolve(db, id);
         var existing = GetDevice(db, id);
         if (existing is null)
         {
@@ -353,7 +359,76 @@ public sealed class Store
     public Device? GetDevice(string id)
     {
         using var db = Open();
-        return GetDevice(db, id);
+        return GetDevice(db, Resolve(db, id));
+    }
+
+    /// <summary>The device id an id stands for now: itself, or the device it was merged into.</summary>
+    public string ResolveDeviceId(string id)
+    {
+        using var db = Open();
+        return Resolve(db, id);
+    }
+
+    /// <summary>The device an id stands for now: itself, or the device it was merged into.</summary>
+    static string Resolve(SqliteConnection db, string id) =>
+        Scalar(db, "SELECT device_id FROM device_aliases WHERE old_id = $id", ("$id", id)) as string ?? id;
+
+    /// <summary>Every device's old ids (merged into it), by device id.</summary>
+    public Dictionary<string, List<string>> Aliases()
+    {
+        using var db = Open();
+        return Rows(db, "SELECT device_id, old_id FROM device_aliases ORDER BY merged_at", r => (Id: r.GetString(0), Old: r.GetString(1)))
+            .GroupBy(a => a.Id).ToDictionary(g => g.Key, g => g.Select(a => a.Old).ToList());
+    }
+
+    /// <summary>
+    /// The same iPad seen as two devices (Safari and the home screen app, or the app installed again,
+    /// each start with their own storage, so their own id): <paramref name="fromId"/> becomes
+    /// <paramref name="intoId"/>. Its scans, stacks, truck check scans, history and photo records move
+    /// to that device, its id is kept as an alias (an app still using it is that device from now on)
+    /// and its record goes. The device kept keeps its name, colour and number.
+    /// </summary>
+    public async Task<Device> MergeDeviceAsync(string fromId, string intoId, Device by)
+    {
+        await gate.WaitAsync();
+        try
+        {
+            using var db = Open();
+            fromId = Resolve(db, fromId);
+            intoId = Resolve(db, intoId);
+            var from = GetDevice(db, fromId) ?? throw new KeyNotFoundException($"No device {fromId}.");
+            var into = GetDevice(db, intoId) ?? throw new KeyNotFoundException($"No device {intoId}.");
+            if (from.Id == into.Id)
+                throw new OpException("That is the same device.");
+            var now = DateTime.UtcNow.ToString("o");
+            using var tx = db.BeginTransaction();
+            (string, object?)[] ids = [("$from", from.Id), ("$into", into.Id)];
+            Exec(db, "UPDATE activity SET device_id = $into WHERE device_id = $from", ids);
+            Exec(db, "UPDATE photos SET device_id = $into, device_number = $num WHERE device_id = $from", [.. ids, ("$num", into.Number)]);
+            Exec(db, "UPDATE stacks SET created_by = $into WHERE created_by = $from", ids);
+            Exec(db, "UPDATE entries SET scanned_by = $into WHERE scanned_by = $from", ids);
+            Exec(db, "UPDATE check_scans SET scanned_by = $into WHERE scanned_by = $from", ids);
+            Exec(db, "UPDATE device_aliases SET device_id = $into WHERE device_id = $from", ids);
+            Exec(db, "INSERT INTO device_aliases (old_id, device_id, merged_at) VALUES ($from, $into, $now) ON CONFLICT (old_id) DO UPDATE SET device_id = $into, merged_at = $now",
+                [.. ids, ("$now", now)]);
+            // The kept device was seen when either was; its app version and address are the newest one's.
+            if (string.CompareOrdinal(from.LastSeenAt, into.LastSeenAt) > 0)
+                Exec(db, "UPDATE devices SET last_seen_at = $seen, last_ip = $ip, user_agent = COALESCE($ua, user_agent), app_version = COALESCE($v, app_version) WHERE id = $into",
+                    [.. ids, ("$seen", from.LastSeenAt), ("$ip", from.LastIp), ("$ua", from.UserAgent), ("$v", from.AppVersion)]);
+            if (string.CompareOrdinal(from.CreatedAt, into.CreatedAt) < 0)
+                Exec(db, "UPDATE devices SET created_at = $at WHERE id = $into", [.. ids, ("$at", from.CreatedAt)]);
+            Exec(db, "DELETE FROM devices WHERE id = $from", ids);
+            AddActivity(db, now, by, "device-merge", null, null, null, null, null, null,
+                $"Merged {from.Name} ({from.User}) into {into.Name} ({into.User}): the same iPad");
+            tx.Commit();
+            // Loads in memory still name the old id: read them again from the database when next used.
+            loads.Clear();
+            return GetDevice(db, into.Id)!;
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     static Device? GetDevice(SqliteConnection db, string id) =>

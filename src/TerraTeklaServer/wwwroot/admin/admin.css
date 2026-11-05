@@ -53,10 +53,10 @@ main { padding: 1.25rem; max-width: 1400px; margin: 0 auto; }
 }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: #111; border-color: var(--accent); }
-input[type=text], input[type=password], input[type=search] {
+input[type=text], input[type=password], input[type=search], #merge-into {
   font: inherit; color: var(--text); background: #0e0e0e; border: 1px solid #444; border-radius: 6px; padding: .5rem .7rem; min-height: 40px; width: 100%;
 }
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* Devices */
 .devices { display: grid; gap: .75rem; }
