@@ -738,9 +738,11 @@ app.Run();
 
 // ---- Helpers ------------------------------------------------------------------------------------
 
+// Not case sensitive, and spaces around it don't count: a key typed on an iPad keyboard (which
+// likes to capitalise), or read by a barcode scanner with Caps Lock on, still works.
 bool KeyOk(string presented) => settings.AccessKey == "" || CryptographicOperations.FixedTimeEquals(
-    SHA256.HashData(Encoding.UTF8.GetBytes(presented)),
-    SHA256.HashData(Encoding.UTF8.GetBytes(settings.AccessKey)));
+    SHA256.HashData(Encoding.UTF8.GetBytes(presented.Trim().ToUpperInvariant())),
+    SHA256.HashData(Encoding.UTF8.GetBytes(settings.AccessKey.Trim().ToUpperInvariant())));
 
 // The device making a request, from its X-Terra-Device header (made up by the app once and kept on
 // the iPad). Seeing it also records when it was last seen.

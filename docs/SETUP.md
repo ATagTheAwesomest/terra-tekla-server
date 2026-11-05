@@ -44,7 +44,7 @@ variables with the same names. Restart the service after changing them
 | Key | Default | Meaning |
 |---|---|---|
 | `Urls` | `http://localhost:5000` | Where the server listens. `http://0.0.0.0:8095` takes connections from the network on port 8095. |
-| `ACCESS_KEY` | empty | The key every iPad and the admin page must give (`Authorization: Bearer <key>`, and in the live connection's hello). Empty = no key, anyone who can reach the server can use it; only for testing. Make one with `[Convert]::ToBase64String((1..32 \| % { Get-Random -Max 256 }) -as [byte[]])`. |
+| `ACCESS_KEY` | empty | The key every iPad and the admin page must give (`Authorization: Bearer <key>`, and in the live connection's hello). Not case sensitive (an iPad keyboard or a scanner with Caps Lock can't break it). Empty = no key, anyone who can reach the server can use it; only for testing. Make one with `[Convert]::ToBase64String((1..32 \| % { Get-Random -Max 256 }) -as [byte[]])`. |
 | `CONVERSION_URL` | empty | tekla-conversion-layer's address as this server reaches it, e.g. `http://127.0.0.1:8090` when both run on the same computer. Without it, scans and reads answer 502. |
 | `CONVERSION_KEY` | empty | The conversion layer's `API_TOKEN`. Only this server holds it; the iPads never see it. |
 | `CLIENT_ROOT` | empty | Folder with the iPad app: a git clone of terra-tekla-client (the folder with `index.html`). Relative paths are next to the exe. Without it `/` shows a short "not set up" page. |

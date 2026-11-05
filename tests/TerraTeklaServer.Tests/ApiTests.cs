@@ -58,6 +58,17 @@ public sealed class ApiTests : IDisposable
     }
 
     [Fact]
+    public async Task The_key_is_not_case_sensitive()
+    {
+        foreach (var typed in new[] { Key.ToLowerInvariant(), Key.ToUpperInvariant(), $" {Key} " })
+        {
+            var client = factory.CreateClient();
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Bearer {typed}");
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/status")).StatusCode);
+        }
+    }
+
+    [Fact]
     public async Task A_new_device_gets_a_fixed_user_number_and_cannot_rename_itself()
     {
         var a = Client("ipad-0000-a");
