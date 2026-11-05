@@ -139,7 +139,7 @@ app.Map("/ws", async (HttpContext http) =>
     Device? device = null;
     if (deviceId is not null)
         device = store.Touch(deviceId, http.Connection.RemoteIpAddress?.ToString(), http.Request.Headers.UserAgent, LoadOps.Str(hello, "version")).Device;
-    await hub.RunAsync(socket, deviceId, kind, new { type = "welcome", device, devices = DeviceList(), serverVersion = version, photosEnabled = settings.Photos.Enabled }, stop.Token);
+    await hub.RunAsync(socket, device?.Id ?? deviceId, kind, new { type = "welcome", device, devices = DeviceList(), serverVersion = version, photosEnabled = settings.Photos.Enabled }, stop.Token);
     return Results.Empty;
 });
 
@@ -189,7 +189,7 @@ browse.MapGet("/{job}/{load}", (string job, string load, HttpContext http) => Ph
 {
     var keyed = Keyed(http);
     var meta = store.Photos(job, load);
-    var devices = store.Devices().ToDictionary(d => d.Id);
+    var devices = DeviceLookup();
     var folder = photos.LoadFolder(job, load);
     var files = photos.List(job, load).Select(f =>
     {
@@ -227,7 +227,11 @@ var api = app.MapGroup("/api").AddEndpointFilter(async (context, next) =>
 {
     var header = context.HttpContext.Request.Headers.Authorization.ToString();
     var presented = header.StartsWith("Bearer ", StringComparison.Ordinal) ? header[7..] : "";
-    return KeyOk(presented) ? await next(context) : Results.Problem("The access key was refused.", statusCode: 401);
+    if (!KeyOk(presented))
+        return Results.Problem("The access key was refused.", statusCode: 401);
+    if (CleanDeviceId(context.HttpContext.Request.Headers["X-Terra-Device"].ToString()) is { } device)
+        RememberDevice(context.HttpContext, store.ResolveDeviceId(device));
+    return await next(context);
 });
 
 // PowerFab, through tekla-conversion-layer. The app sends exactly what it used to send to the
@@ -317,6 +321,17 @@ api.MapGet("/status", async (IHttpClientFactory http) => new
 });
 
 api.MapGet("/devices", () => DeviceList());
+
+// A newly installed app (its storage, so its id, is new) saying which iPad it is: this device is
+// merged into {"into": "<device id>"} and the app carries on as that one. Only for a device first
+// seen in the last day; an older one is merged on the admin board, with the admin code.
+api.MapPost("/devices/claim", async (DeviceMerge body, HttpContext http) =>
+{
+    var me = Me(http, required: true)!;
+    if (DateTime.TryParse(me.CreatedAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var made) && DateTime.UtcNow - made.ToUniversalTime() > NewDeviceWindow)
+        return Results.Problem("This iPad has been in use for over a day. Merge it on the admin board (Devices), with the admin code.", statusCode: 403);
+    return await DeviceMergeAsync(me.Id, body.Into, me);
+});
 
 api.MapGet("/jobs", () => store.Jobs().Select(j => new { job = j.Job, loads = j.Loads, pieces = j.Pieces, lastAt = j.LastAt }));
 api.MapGet("/jobs/{job}/loads", async (string job) => await store.ForJobAsync(job));
@@ -425,6 +440,11 @@ admin.MapDelete("/photos/{job}/{load}/{name}", (string job, string load, string 
 // Renaming and recolouring an iPad: the admin board only.
 admin.MapPut("/devices/{id}", (string id, DeviceUpdate update, HttpContext http) =>
     DeviceChange(id, update, Me(http) ?? AdminDevice));
+
+// The same iPad seen as two devices: {id} is merged into {"into": "<device id>"} (its scans, history
+// and photos move there, and an app still using its id is that device from now on).
+admin.MapPost("/devices/{id}/merge", async (string id, DeviceMerge body, HttpContext http) =>
+    await DeviceMergeAsync(id, body.Into, Me(http) ?? AdminDevice));
 
 admin.MapGet("/settings", () => SettingsView());
 admin.MapPut("/settings", (Dictionary<string, string?> changes) =>
@@ -614,7 +634,7 @@ api.MapGet("/photos/recent", (string? device, int? limit) => settings.Photos.Ena
 api.MapGet("/photos/newest", (int? limit, int? offset, CancellationToken ct) => PhotosAsync(async () =>
 {
     var all = await browser.NewestAsync(ct);
-    var devices = store.Devices().ToDictionary(d => d.Id);
+    var devices = DeviceLookup();
     var skip = Math.Max(0, offset ?? 0);
     var page = all.Skip(skip).Take(Math.Clamp(limit ?? 60, 1, 200)).Select(p =>
     {
@@ -641,7 +661,7 @@ api.MapGet("/photos/newest", (int? limit, int? offset, CancellationToken ct) => 
 api.MapGet("/photos/{job}/{load}", (string job, string load) => PhotosAsync(() =>
 {
     var meta = store.Photos(job, load);
-    var devices = store.Devices().ToDictionary(d => d.Id);
+    var devices = DeviceLookup();
     var folder = photos.LoadFolder(job, load);
     var files = photos.List(job, load).Select(f =>
     {
@@ -755,6 +775,55 @@ Device? Me(HttpContext http, bool required = false)
     return device;
 }
 
+// The device id is also kept in a cookie. On an iPad, Safari and each home screen install of the app
+// have their own storage, but adding the app to the home screen copies Safari's cookies into it, so a
+// new install that finds this cookie (js/api.js) carries on as the same device instead of a new one.
+// Set by the server (not the page) so Safari keeps it for its full life. Not a secret: the key is.
+static void RememberDevice(HttpContext http, string id)
+{
+    if (http.Request.Cookies[DeviceCookie] == id)
+        return;
+    http.Response.Cookies.Append(DeviceCookie, id, new CookieOptions
+    {
+        Path = "/", MaxAge = TimeSpan.FromDays(3650), SameSite = SameSiteMode.Lax, HttpOnly = false,
+        Secure = http.Request.IsHttps || http.Request.Headers["X-Forwarded-Proto"] == "https",
+        IsEssential = true,
+    });
+}
+
+// Devices by id, and by every old id merged into them (photo tags and old offline data still name those).
+Dictionary<string, Device> DeviceLookup()
+{
+    var devices = store.Devices().ToDictionary(d => d.Id);
+    foreach (var (id, olds) in store.Aliases())
+        if (devices.TryGetValue(id, out var d))
+            foreach (var old in olds)
+                devices.TryAdd(old, d);
+    return devices;
+}
+
+async Task<IResult> DeviceMergeAsync(string fromId, string? intoId, Device by)
+{
+    if (CleanDeviceId(intoId) is not { } into)
+        return Results.Problem("Pick the device to keep (\"into\").", statusCode: 400);
+    try
+    {
+        var kept = await store.MergeDeviceAsync(fromId, into, by);
+        // An app still connected with the old id switches to the kept one (js/live.js).
+        hub.Broadcast(new { type = "device-merged", from = fromId, into = kept.Id, device = kept });
+        hub.Broadcast(new { type = "devices", devices = DeviceList() });
+        return Results.Json(kept);
+    }
+    catch (OpException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+    catch (KeyNotFoundException ex)
+    {
+        return Results.NotFound(new { detail = ex.Message });
+    }
+}
+
 // Who took a photo: from the database (the iPad's current name and fixed "User N"), else from the
 // TERRA tag in the file, else from its file name (marked as a guess), else unknown (nulls).
 (string? By, string? User, string? Color, bool Guess) PhotoWho(PhotoMeta? m, Dictionary<string, Device> devices, string folder, string name)
@@ -783,11 +852,18 @@ static string? CleanDeviceId(string? id) =>
 object[] DeviceList()
 {
     var online = hub.Online();
-    return store.Devices().Select(d => (object)new
+    var aliases = store.Aliases();
+    return store.Devices().Select(d =>
     {
-        d.Id, d.Number, d.User, d.Name, d.Color, d.CreatedAt, d.LastSeenAt, d.LastIp, d.UserAgent, d.AppVersion,
-        online = online.ContainsKey(d.Id),
-        onlineSince = online.TryGetValue(d.Id, out var since) ? since : (DateTime?)null,
+        var ids = aliases.TryGetValue(d.Id, out var olds) ? olds : [];
+        var since = online.Where(o => o.Key == d.Id || ids.Contains(o.Key)).Select(o => (DateTime?)o.Value).Min();
+        return (object)new
+        {
+            d.Id, d.Number, d.User, d.Name, d.Color, d.CreatedAt, d.LastSeenAt, d.LastIp, d.UserAgent, d.AppVersion,
+            aliases = ids,
+            online = since is not null,
+            onlineSince = since,
+        };
     }).ToArray();
 }
 
@@ -1031,10 +1107,17 @@ static Microsoft.AspNetCore.StaticFiles.FileExtensionContentTypeProvider ClientC
 public partial class Program
 {
     /// <summary>The admin page's changes are made as this pseudo device (it has no X-Terra-Device).</summary>
+    /// <summary>The cookie that also holds this device's id (see RememberDevice).</summary>
+    const string DeviceCookie = "terra_device";
+
+    /// <summary>How long after it is first seen a device may say which iPad it is itself (POST /api/devices/claim).</summary>
+    static readonly TimeSpan NewDeviceWindow = TimeSpan.FromDays(1);
+
     static readonly Device AdminDevice = new("admin", "Admin page", "#9a9a9a", "", "", null, null, null, 0);
 }
 
 public sealed record DeviceUpdate(string? Name, string? Color);
+public sealed record DeviceMerge(string? Into);
 public sealed record PinRequest(string? Pin);
 public sealed record PinChange(string? Current, string? Pin);
 public sealed record UrlRequest(string? Url);

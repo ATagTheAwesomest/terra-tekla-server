@@ -169,6 +169,7 @@ address that got it.
 | `PUT /api/admin/pin` `{"pin"}` | Changes the code (this device is unlocked already, so the current one isn't asked again). Rewrites `admin-code.txt`. |
 | `POST /api/admin/pin/generate` | A new random 6-digit code in place of the current one, also written to `admin-code.txt`. Answers `{"code","token","until"}`. |
 | `PUT /api/admin/devices/{id}` `{"name"?,"color"?}` | Renames / recolours an iPad. Name 1-40 characters, colour `#rrggbb`. |
+| `POST /api/admin/devices/{id}/merge` `{"into"}` | The same iPad seen as two devices: `{id}` is merged into `into` (see "One iPad, one device"). Answers the device kept. |
 | `GET/PUT /api/admin/settings` | The editable settings / save some (`{"KEY": "value"}`; a secret left out or null is kept). |
 | `POST /api/admin/test-conversion` `{"url"}` | Whether that address answers like the conversion layer. |
 | `GET/PUT /api/admin/photo-rules`, `POST /api/admin/photo-rules/test` | The photo folder rules; where a job's photos would go. |
@@ -267,6 +268,17 @@ stack per load.
   and colour are changed on the admin board only. Anything per iPad later (for example its own
   PowerFab login, picked by the `/api/powerfab` pass-through from `X-Terra-Device`) hangs off this
   device record.
+- **One iPad, one device.** Safari and the home screen app, and every new install of the app, start
+  with their own storage, so they would each make up a new id. To keep them one device:
+  - the server also keeps the id in a `terra_device` cookie (10 years). Adding the app to the home
+    screen copies Safari's cookies into it, so the app finds the id there and carries on as the same
+    device;
+  - an app that is new on the server (first seen in the last day) asks "Which iPad is this?" once
+    and, when an existing one is picked, joins it (`POST /api/devices/claim`);
+  - on the admin board, a device's page has **Same iPad as another device?**: merging moves its
+    scans, stacks, truck check scans, history and photo records to the device kept, keeps its id as an
+    alias (`device_aliases`) and removes it. An app still using the old id is the kept device from
+    then on and switches to its id; the old id is never made into a device again.
 - Every change to a load's stacks is an **operation** (below) the app applies on screen at once, then
   sends to `POST /api/loads/{loadId}/ops`. The server applies it to its copy, saves it, answers the
   load as it now is, and sends it to every connected iPad over `/ws`. The server's copy wins.
@@ -302,7 +314,8 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | POST | `/api/powerfab/{command}` | Sent on to the conversion layer's `/api/powerfab/{command}` with `CONVERSION_KEY`; its answer comes back as it is. The conversion layer refusing that key answers 502. |
 | GET | `/api/me` | This device (needs `X-Terra-Device`): `{ id, number, user, name, color, createdAt, lastSeenAt, ... }`. `user` is "User {number}". |
 | PUT | `/api/me` | Always 403: an iPad can't rename itself. |
-| GET | `/api/devices` | Every device, with `number`, `user`, `online` and `onlineSince`. |
+| GET | `/api/devices` | Every device, with `number`, `user`, `aliases` (old ids merged into it), `online` and `onlineSince`. |
+| POST | `/api/devices/claim` `{"into"}` | A new install saying which iPad it is: this device (from `X-Terra-Device`) is merged into `into`. Only for a device first seen in the last day (else 403: merge it on the admin board). Answers the device kept. |
 | GET | `/api/jobs` | Jobs the server has stacks for: `[{ job, loads, pieces, lastAt }]`. |
 | GET | `/api/jobs/{job}/loads` | Every load of a job the server has, as load states (below). |
 | GET | `/api/loads/{loadId}?job=&number=` | One load's state. A load not seen before answers an empty state with one stack (not saved until changed). |
@@ -384,6 +397,7 @@ the socket with code 4401. Then the server sends:
 | `load` | `state`, `by` (device id), `op` | A load changed. |
 | `activity` | `items` | New history lines. |
 | `devices` | `devices` | A device was added, renamed, recoloured, came online or went offline. |
+| `device-merged` | `from`, `into`, `device` | Device `from` was merged into `into`; an app using `from` switches to `into`. |
 | `photos` | `job`, `load` | A load's photos changed. |
 | `pong` | `at` | Answer to `{ "type": "ping" }`. |
 
@@ -395,7 +409,7 @@ and re-reads the open load.
 `scan`, `refused`, `unload`, `sync-remove` (a piece PowerFab no longer has on the load),
 `auto-stack` (a piece loaded in PowerFab itself), `move`, `stack-add`, `stack-rename`,
 `stack-delete`, `check`, `check-undo`, `check-reset`, `check-complete`, `ship`, `unship`, `return`,
-`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`.
+`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`, `device-merge`.
 
 ## Database
 
@@ -412,6 +426,7 @@ is running. Times are UTC ISO-8601 text.
 | `check_scans` | `load_id`, `id`, `position`, `mark`, `manual`, `scanned_at`, `scanned_by`, `qty` | Shared truck check scans (`qty` > 1: a whole pallet). |
 | `activity` | `id`, `at`, `device_id`, `device_name`, `kind`, `job`, `load_id`, `load_number`, `stack_id`, `stack_name`, `mark`, `text` | The history. `device_name` is the name at the time. |
 | `photos` | `id`, `job`, `load_number`, `file_name`, `mark`, `device_id`, `device_name`, `device_number`, `bytes`, `taken_at`, `deleted_at` | A record of each photo saved. `device_number` is the iPad's fixed "User N". |
+| `device_aliases` | `old_id`, `device_id`, `merged_at` | Device ids merged into another device (the same iPad). A request with an old id is that device. |
 
 Handy queries (`sqlite3 terra.db`):
 

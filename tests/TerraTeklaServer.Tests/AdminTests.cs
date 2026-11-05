@@ -127,6 +127,72 @@ public sealed class AdminTests : IDisposable
         Assert.Contains(history!, h => (string?)h!["kind"] == "device-rename");
     }
 
+    HttpClient Ipad(string id)
+    {
+        var ipad = factory.CreateClient();
+        ipad.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", Key);
+        ipad.DefaultRequestHeaders.Add("X-Terra-Device", id);
+        return ipad;
+    }
+
+    static object Op(string op, string entryId, string mark) => new { op, opId = Guid.NewGuid().ToString("N"), job = "J1", loadNumber = "8", entryId, mark };
+
+    [Fact]
+    public async Task The_admin_board_merges_two_devices_that_are_one_ipad()
+    {
+        var oldApp = Ipad("ipad-old-install");
+        var newApp = Ipad("ipad-new-install");
+        await oldApp.GetAsync("/api/me");
+        await oldApp.PostAsJsonAsync("/api/loads/L1/ops", Op("beginScan", "e1", "1001-C1"));
+        await newApp.PostAsJsonAsync("/api/loads/L1/ops", Op("beginScan", "e2", "1002-B1"));
+        await newApp.PostAsJsonAsync("/api/loads/L1/ops", new { op = "finishScan", opId = "f2", job = "J1", loadNumber = "8", entryId = "e2", mark = "1002-B1", piece = new { mark = "1002-B1", sequence = "1", weight = 10 } });
+        var admin = Client(await Setup());
+        await admin.PutAsJsonAsync("/api/admin/devices/ipad-old-install", new { name = "iPad 1" });
+
+        Assert.Equal(HttpStatusCode.Forbidden, (await Client().PostAsJsonAsync("/api/admin/devices/ipad-new-install/merge", new { into = "ipad-old-install" })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await admin.PostAsJsonAsync("/api/admin/devices/ipad-old-install/merge", new { into = "ipad-old-install" })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await admin.PostAsJsonAsync("/api/admin/devices/ipad-new-install/merge", new { into = "no-such-device" })).StatusCode);
+        var merged = await admin.PostAsJsonAsync("/api/admin/devices/ipad-new-install/merge", new { into = "ipad-old-install" });
+        Assert.Equal(HttpStatusCode.OK, merged.StatusCode);
+
+        // One device left, keeping its name and number, with the other's id as an alias.
+        var devices = await oldApp.GetFromJsonAsync<JsonArray>("/api/devices");
+        var kept = Assert.Single(devices!)!;
+        Assert.Equal("iPad 1", (string?)kept["name"]);
+        Assert.Equal(1, (int)kept["number"]!);
+        Assert.Equal("ipad-new-install", (string?)kept["aliases"]![0]);
+
+        // Both scans are the kept device's now.
+        var load = await oldApp.GetFromJsonAsync<JsonObject>("/api/loads/L1?job=J1&number=8");
+        Assert.All(load!["stacks"]![0]!["items"]!.AsArray(), row => Assert.Equal("ipad-old-install", (string?)row!["scannedBy"]));
+        var history = await oldApp.GetFromJsonAsync<JsonArray>("/api/activity?device=ipad-old-install");
+        Assert.Contains(history!, h => (string?)h!["mark"] == "1002-B1");
+        Assert.Contains(await oldApp.GetFromJsonAsync<JsonArray>("/api/activity?device=admin") ?? [], h => (string?)h!["kind"] == "device-merge");
+
+        // The merged app keeps working and is that device: it is never made again.
+        var me = await newApp.GetFromJsonAsync<JsonObject>("/api/me");
+        Assert.Equal("ipad-old-install", (string?)me!["id"]);
+        await newApp.PostAsJsonAsync("/api/loads/L1/ops", Op("beginScan", "e3", "1003-W2"));
+        Assert.Single((await oldApp.GetFromJsonAsync<JsonArray>("/api/devices"))!);
+        load = await oldApp.GetFromJsonAsync<JsonObject>("/api/loads/L1?job=J1&number=8");
+        Assert.Equal("ipad-old-install", (string?)load!["stacks"]![0]!["items"]![2]!["scannedBy"]);
+    }
+
+    [Fact]
+    public async Task A_new_install_says_which_ipad_it_is()
+    {
+        var oldApp = Ipad("ipad-old-install");
+        await oldApp.GetAsync("/api/me");
+        var newApp = Ipad("ipad-new-install");
+        var reply = await newApp.PostAsJsonAsync("/api/devices/claim", new { into = "ipad-old-install" });
+        Assert.Equal(HttpStatusCode.OK, reply.StatusCode);
+        Assert.Equal("ipad-old-install", (string?)(await reply.Content.ReadFromJsonAsync<JsonObject>())!["id"]);
+        Assert.Single((await oldApp.GetFromJsonAsync<JsonArray>("/api/devices"))!);
+        // The server also keeps the id in a cookie, so a home screen install copied from Safari finds it.
+        var cookie = (await Ipad("ipad-third-one").GetAsync("/api/me")).Headers.GetValues("Set-Cookie").Single();
+        Assert.StartsWith("terra_device=ipad-third-one;", cookie);
+    }
+
     [Fact]
     public void Devices_from_before_numbers_are_numbered_in_the_order_they_were_first_seen()
     {
