@@ -76,6 +76,71 @@ public sealed class Hub(ILogger<Hub> log)
             _ = SendBytesAsync(conn, bytes);
     }
 
+    /// <summary>Operations that change what PowerFab has loaded: an iPad seeing one reads PowerFab again.</summary>
+    public static readonly HashSet<string> PowerFabOps = ["finishScan", "removeEntry", "clear"];
+
+    /// <summary>How long a load's changes are gathered before they go out as one message.</summary>
+    public static TimeSpan LoadDelay { get; set; } = TimeSpan.FromMilliseconds(60);
+
+    sealed class PendingLoad
+    {
+        public required LoadState State;
+        public required string By;
+        public required string Op;
+    }
+
+    readonly Dictionary<string, PendingLoad> pendingLoads = new();
+
+    /// <summary>
+    /// Sends a load's stacks to every connection as {"type":"load", state, by, op}. Changes to the same
+    /// load by the same device that come within <see cref="LoadDelay"/> of each other go out once, as
+    /// the newest state (fast scanning would otherwise send every iPad the whole load for every scan);
+    /// <c>op</c> is then one that changed PowerFab, if any did.
+    /// </summary>
+    public void BroadcastLoad(LoadState state, string by, string op)
+    {
+        PendingLoad? flushNow = null;
+        lock (pendingLoads)
+        {
+            if (pendingLoads.TryGetValue(state.LoadId, out var pending))
+            {
+                if (pending.By == by)
+                {
+                    if (state.Rev >= pending.State.Rev)
+                        pending.State = state;
+                    if (!PowerFabOps.Contains(pending.Op))
+                        pending.Op = op;
+                    return;
+                }
+                // Another device's change: what is waiting goes first, in order.
+                flushNow = pending;
+                pending.State = state;
+                pending.By = by;
+                pending.Op = op;
+                flushNow = new PendingLoad { State = flushNow.State, By = flushNow.By, Op = flushNow.Op };
+            }
+            else
+            {
+                pendingLoads[state.LoadId] = new PendingLoad { State = state, By = by, Op = op };
+                _ = SendLoadLaterAsync(state.LoadId);
+            }
+        }
+        if (flushNow is not null)
+            Broadcast(new { type = "load", state = flushNow.State, by = flushNow.By, op = flushNow.Op });
+    }
+
+    async Task SendLoadLaterAsync(string loadId)
+    {
+        await Task.Delay(LoadDelay);
+        PendingLoad? pending;
+        lock (pendingLoads)
+        {
+            if (!pendingLoads.Remove(loadId, out pending))
+                return;
+        }
+        Broadcast(new { type = "load", state = pending.State, by = pending.By, op = pending.Op });
+    }
+
     Task SendAsync(Connection conn, object message) => SendBytesAsync(conn, JsonSerializer.SerializeToUtf8Bytes(message, Json.Options));
 
     async Task SendBytesAsync(Connection conn, byte[] bytes)

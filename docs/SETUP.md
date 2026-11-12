@@ -280,8 +280,12 @@ stack per load.
     alias (`device_aliases`) and removes it. An app still using the old id is the kept device from
     then on and switches to its id; the old id is never made into a device again.
 - Every change to a load's stacks is an **operation** (below) the app applies on screen at once, then
-  sends to `POST /api/loads/{loadId}/ops`. The server applies it to its copy, saves it, answers the
-  load as it now is, and sends it to every connected iPad over `/ws`. The server's copy wins.
+  sends to `POST /api/loads/{loadId}/ops` (several queued ones at once to `/ops/batch`). The server
+  applies it to its copy, saves it, answers the load as it now is, and sends it to every connected
+  iPad over `/ws`. The server's copy wins.
+- **Built for fast scanning.** A change writes only the rows it touched (a load with thousands of
+  pieces costs no more to scan into than an empty one), loads in use stay in memory, and replies and
+  live messages are compressed (gzip, and permessage-deflate on `/ws`).
 - Operations name stacks and rows by ids the app makes up, so two iPads working the same load at the
   same time don't overwrite each other. Each has an `opId`; one the server already applied is skipped,
   so the app can safely resend.
@@ -320,6 +324,8 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | GET | `/api/jobs/{job}/loads` | Every load of a job the server has, as load states (below). |
 | GET | `/api/loads/{loadId}?job=&number=` | One load's state. A load not seen before answers an empty state with one stack (not saved until changed). |
 | POST | `/api/loads/{loadId}/ops` | Apply one operation. Body: `{ "op", "opId", "job", "loadNumber", ...fields }`. Answers `{ state, changed }`. 400 with the reason if it can't be applied. |
+| POST | `/api/loads/{loadId}/ops/batch` | Apply up to 500 operations in order, in one write: `{ "job", "loadNumber", "ops": [...] }`. Answers `{ state, changed, results: [{ opId, changed, error }] }`; an operation the load refuses is skipped with its `error`, the rest still apply. The app sends what it has queued this way. |
+| | `/api/jobs/{job}/codes...` | Piece codes: see `PIECE-CODES.md`. |
 | GET | `/api/activity?device=&job=&load=&mark=&before=&limit=` | History, newest first. `load` is the load id; `before` an activity id for paging; `limit` up to 500 (default 100). |
 | GET | `/api/docs/setup`, `/api/docs/photos` | This file and `PHOTOS.md`, as Markdown. |
 | | `/api/photos...` | See `PHOTOS.md`. |
@@ -358,7 +364,7 @@ All carry `op`, `opId` (unique, made by the app), `job` and `loadNumber`. Ids (`
 | `rename` | `stackId`, `name` | Renames a stack (spaces squeezed, up to 60 characters). |
 | `removeStack` | `stackId` | Deletes the stack. The app takes its pieces off the load in PowerFab first. |
 | `moveEntryTo` | `entryId`, `stackId`, `index` | Moves a row to position `index` of a stack (counted before the move). |
-| `beginScan` | `entryId` or `entryIds`, `mark`, `manual`, `stackId`? | A scan started: a "waiting on PowerFab" row in that stack (or the last stack that isn't a pallet). `entryIds` makes one row per id (a pallet's pieces). |
+| `beginScan` | `entryId` or `entryIds`, `mark`, `manual`, `stackId`?, `code`? | A scan started: a "waiting on PowerFab" row in that stack (or the last stack that isn't a pallet). `entryIds` makes one row per id (a pallet's pieces). |
 | `finishScan` | `entryId` or `entryIds`, `mark`, `manual`, `stackId`?, `piece` | PowerFab assigned and loaded it: the row(s) get `piece`'s details and sequence (one history line for all of them). |
 | `failScan` | `entryId` or `entryIds`, `mark`, `title`?, `message`? | PowerFab refused it: the row(s) go, the refusal goes in the history. |
 | `refused` | `mark`, `title`?, `message`? | History only: a scan refused before it got a row (too many, not on the job, shipped load...). |
@@ -366,7 +372,7 @@ All carry `op`, `opId` (unique, made by the app), `job` and `loadNumber`. Ids (`
 | `removeEntry` | `entryId` or `entryIds` | PowerFab took them off the load: the rows go. |
 | `sync` | `pieces: [{ mark, sequence, n, ...details }]`, `knownRev` | Brings the stacks in line with what PowerFab has loaded (see sync above). |
 | `startCheck` / `resetCheck` | | Starts / clears the shared truck check. |
-| `addCheck` | `scanId`, `mark`, `manual`, `qty`? | A piece checked on the truck; `qty` > 1 checks that many of the mark at once (a whole pallet). |
+| `addCheck` | `scanId`, `mark`, `manual`, `qty`?, `code`? | A piece checked on the truck; `qty` > 1 checks that many of the mark at once (a whole pallet). `code`: a piece code (see `PIECE-CODES.md`). |
 | `removeCheck` | `scanId` | Undo one check. |
 | `log` | `kind`, `text`, `mark`? | History only, for things done in PowerFab: `ship`, `unship`, `return`, `unreturn`, `load-create`, `check-complete`. |
 | `clear` | | The load was deleted in PowerFab: back to one empty stack. History stays. |
@@ -394,11 +400,12 @@ the socket with code 4401. Then the server sends:
 | `type` | Fields | When |
 |---|---|---|
 | `welcome` | `device`, `devices`, `serverVersion`, `photosEnabled` | Right after the hello. |
-| `load` | `state`, `by` (device id), `op` | A load changed. |
+| `load` | `state`, `by` (device id), `op` | A load changed. Changes by one device within 60 ms go out once, as the newest state (`op` is then one that changed PowerFab, if any did). |
 | `activity` | `items` | New history lines. |
 | `devices` | `devices` | A device was added, renamed, recoloured, came online or went offline. |
 | `device-merged` | `from`, `into`, `device` | Device `from` was merged into `into`; an app using `from` switches to `into`. |
 | `photos` | `job`, `load` | A load's photos changed. |
+| `codes`, `codes-settings`, `codes-cleared` | `job`, ... | A job's piece codes changed (see `PIECE-CODES.md`). |
 | `pong` | `at` | Answer to `{ "type": "ping" }`. |
 
 The app reconnects by itself (backing off up to 30 seconds) and, on reconnect, sends anything waiting
@@ -409,7 +416,8 @@ and re-reads the open load.
 `scan`, `refused`, `unload`, `sync-remove` (a piece PowerFab no longer has on the load),
 `auto-stack` (a piece loaded in PowerFab itself), `move`, `stack-add`, `stack-rename`,
 `stack-delete`, `check`, `check-undo`, `check-reset`, `check-complete`, `ship`, `unship`, `return`,
-`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`, `device-merge`.
+`unreturn`, `load-create`, `load-delete`, `photo`, `photo-delete`, `device-rename`, `device-merge`,
+`codes-settings`, `codes-import`, `code-pair`, `codes-clear`.
 
 ## Database
 
@@ -422,11 +430,12 @@ is running. Times are UTC ISO-8601 text.
 | `devices` | `id`, `number`, `name`, `color`, `created_at`, `last_seen_at`, `last_ip`, `user_agent`, `app_version` | Every iPad seen. `number` is fixed and unique (devices from before it are numbered by when first seen). |
 | `loads` | `load_id`, `job`, `load_number`, `rev`, `updated_at`, `check_started_at`, `check_updated_at`, `recent_ops` (JSON), `removed` (JSON) | One row per load with stacks. |
 | `stacks` | `load_id`, `id`, `position`, `name`, `created_by`, `pallet` (JSON, null for a plain stack) | Stacks in order. |
-| `entries` | `load_id`, `id`, `stack_id`, `position`, `mark`, `sequence`, `manual`, `pending`, `removing`, `scanned_at`, `scanned_by`, `added_at`, `rev`, `details` (JSON) | Rows (pieces) in each stack. |
-| `check_scans` | `load_id`, `id`, `position`, `mark`, `manual`, `scanned_at`, `scanned_by`, `qty` | Shared truck check scans (`qty` > 1: a whole pallet). |
+| `entries` | `load_id`, `id`, `stack_id`, `position`, `mark`, `sequence`, `manual`, `pending`, `removing`, `scanned_at`, `scanned_by`, `added_at`, `rev`, `details` (JSON), `code` | Rows (pieces) in each stack. `code`: the piece code it was loaded with. |
+| `check_scans` | `load_id`, `id`, `position`, `mark`, `manual`, `scanned_at`, `scanned_by`, `qty`, `code` | Shared truck check scans (`qty` > 1: a whole pallet; `code`: a piece code). |
 | `activity` | `id`, `at`, `device_id`, `device_name`, `kind`, `job`, `load_id`, `load_number`, `stack_id`, `stack_name`, `mark`, `text` | The history. `device_name` is the name at the time. |
 | `photos` | `id`, `job`, `load_number`, `file_name`, `mark`, `device_id`, `device_name`, `device_number`, `bytes`, `taken_at`, `deleted_at` | A record of each photo saved. `device_number` is the iPad's fixed "User N". |
 | `device_aliases` | `old_id`, `device_id`, `merged_at` | Device ids merged into another device (the same iPad). A request with an old id is that device. |
+| `piece_codes`, `job_settings` | | Piece codes per job and their settings: see `PIECE-CODES.md`. |
 
 Handy queries (`sqlite3 terra.db`):
 

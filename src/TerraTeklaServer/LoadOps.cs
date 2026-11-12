@@ -3,8 +3,12 @@ using System.Text.Json.Nodes;
 
 namespace TerraTeklaServer;
 
-/// <summary>Who is changing a load, and the revision the change gets.</summary>
-public sealed record OpContext(string DeviceId, string DeviceName, long Rev, DateTime Now)
+/// <summary>
+/// Who is changing a load, and the revision the change gets. <c>CodeElsewhere</c> answers which other
+/// load of the job already has a piece with a code (its load number), or null: a piece code is one
+/// piece, so it can be on one load only.
+/// </summary>
+public sealed record OpContext(string DeviceId, string DeviceName, long Rev, DateTime Now, Func<string, string?>? CodeElsewhere = null)
 {
     public string NowIso => Now.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 }
@@ -31,7 +35,7 @@ public static class LoadOps
     // Fields of a piece that are the row's own, not PowerFab details.
     static readonly HashSet<string> OwnFields = new(StringComparer.OrdinalIgnoreCase)
     {
-        "id", "mark", "sequence", "manual", "scannedAt", "scannedBy", "pending", "removing", "addedAt", "rev", "n",
+        "id", "mark", "sequence", "manual", "code", "scannedAt", "scannedBy", "pending", "removing", "addedAt", "rev", "n",
     };
 
     /// <summary>A load's first stack id. The app uses the same one for a load it hasn't heard about yet.</summary>
@@ -178,11 +182,26 @@ public static class LoadOps
     /// A scan the app is about to send to PowerFab: a row in the scanning iPad's active stack, shown
     /// on every iPad as "loading" straight away. finishScan or failScan follows.
     /// </summary>
-    /// A pallet sends every piece's row at once, in <c>entryIds</c>.
+    /// A pallet sends every piece's row at once, in <c>entryIds</c>. A scan of a piece code (jobs with
+    /// piece codes) sends <c>code</c> with its one <c>entryId</c>: a code is one piece, so it is refused
+    /// when a row on this load or any other load of the job already has it.
     static bool BeginScan(LoadState s, JsonObject op, OpContext ctx)
     {
         var ids = EntryIds(op);
         var mark = Required(op, "mark");
+        var code = PieceCode(op);
+        if (code is not null)
+        {
+            if (ids.Count != 1)
+                throw new OpException("A piece code is one piece: send it with one entryId.");
+            if (FindEntry(s, ids[0]) is null)
+            {
+                if (FindCode(s, code) is { } here)
+                    throw new OpException($"Code {code} is already on this load ({here.Entry.Mark} in {here.Stack.Name}).");
+                if (ctx.CodeElsewhere?.Invoke(code) is { } other)
+                    throw new OpException($"Code {code} is already on load {other}.");
+            }
+        }
         var stack = FindStack(s, Str(op, "stackId")) ?? LastPlainStack(s);
         if (stack.Pallet is { } pallet && !mark.Equals(pallet.Mark, StringComparison.OrdinalIgnoreCase))
             throw new OpException($"{stack.Name} is a pallet of {pallet.Mark}, so {mark} can't go in it.");
@@ -196,6 +215,7 @@ public static class LoadOps
                 Id = id,
                 Mark = mark,
                 Manual = Bool(op, "manual"),
+                Code = code,
                 ScannedAt = ctx.NowIso,
                 ScannedBy = ctx.DeviceId,
                 Pending = true,
@@ -218,7 +238,7 @@ public static class LoadOps
         if (hit is null)
         {
             // The begin never arrived (it is sent first, so this is rare): add the row now.
-            BeginScan(s, new JsonObject { ["entryId"] = id, ["mark"] = Str(op, "mark"), ["manual"] = Bool(op, "manual"), ["stackId"] = Str(op, "stackId") }, ctx);
+            BeginScan(s, new JsonObject { ["entryId"] = id, ["mark"] = Str(op, "mark"), ["manual"] = Bool(op, "manual"), ["stackId"] = Str(op, "stackId"), ["code"] = Str(op, "code") }, ctx);
             hit = FindEntry(s, id);
             if (hit is null)
                 return false;
@@ -230,7 +250,7 @@ public static class LoadOps
         entry.Rev = ctx.Rev;
         entry.Sequence = Str(piece, "sequence");
         entry.Details = DetailsOf(piece);
-        activity.Add(new("scan", $"Loaded {entry.Mark}{(entry.Sequence != "" ? $" (seq {entry.Sequence})" : "")} into {stack.Name}{(entry.Manual ? ", typed on keypad" : "")}", entry.Mark, stack.Id, stack.Name));
+        activity.Add(new("scan", $"Loaded {entry.Mark}{(entry.Code is { } c ? $" code {c}" : "")}{(entry.Sequence != "" ? $" (seq {entry.Sequence})" : "")} into {stack.Name}{(entry.Manual ? ", typed on keypad" : "")}", entry.Mark, stack.Id, stack.Name));
         return true;
     }
 
@@ -386,15 +406,17 @@ public static class LoadOps
         foreach (var (key, rows) in have)
         {
             var extra = rows.Count - (want.TryGetValue(key, out var w) ? w.N : 0);
-            for (var i = rows.Count - 1; i >= 0 && extra > 0; i--)
-            {
-                if (Protected(rows[i].Entry))
-                    continue;
-                rows[i].Stack.Items.Remove(rows[i].Entry);
-                removedMarks.Add(rows[i].Entry.Mark);
-                removed++;
-                extra--;
-            }
+            // Rows without a piece code go first: a row with one stands for a piece that was scanned.
+            foreach (var coded in new[] { false, true })
+                for (var i = rows.Count - 1; i >= 0 && extra > 0; i--)
+                {
+                    if ((rows[i].Entry.Code is not null) != coded || Protected(rows[i].Entry))
+                        continue;
+                    rows[i].Stack.Items.Remove(rows[i].Entry);
+                    removedMarks.Add(rows[i].Entry.Mark);
+                    removed++;
+                    extra--;
+                }
         }
 
         Stack? target = null;
@@ -464,11 +486,16 @@ public static class LoadOps
         if (s.TruckCheck.Scans.Any(x => x.Id == id))
             return false;
         var mark = Required(op, "mark");
+        // A piece code checks off one exact piece, once: the same code again (another iPad got there
+        // first) changes nothing.
+        var code = PieceCode(op);
+        if (code is not null && s.TruckCheck.Scans.Any(x => code.Equals(x.Code, StringComparison.OrdinalIgnoreCase)))
+            return false;
         // A pallet is checked with one scan for all its pieces.
-        var qty = Math.Clamp(Int(op, "qty"), 1, MaxPallet);
-        s.TruckCheck.Scans.Add(new CheckScan { Id = id, Mark = mark, Manual = Bool(op, "manual"), ScannedAt = ctx.NowIso, ScannedBy = ctx.DeviceId, Qty = qty });
+        var qty = code is null ? Math.Clamp(Int(op, "qty"), 1, MaxPallet) : 1;
+        s.TruckCheck.Scans.Add(new CheckScan { Id = id, Mark = mark, Manual = Bool(op, "manual"), ScannedAt = ctx.NowIso, ScannedBy = ctx.DeviceId, Qty = qty, Code = code });
         s.TruckCheck.UpdatedAt = ctx.NowIso;
-        activity.Add(new("check", qty > 1 ? $"Truck check: pallet of {qty} × {mark}" : $"Truck check: {mark}", mark));
+        activity.Add(new("check", qty > 1 ? $"Truck check: pallet of {qty} × {mark}" : code is not null ? $"Truck check: {mark} code {code}" : $"Truck check: {mark}", mark));
         return true;
     }
 
@@ -534,6 +561,29 @@ public static class LoadOps
             ids.Add(id);
         }
         return ids;
+    }
+
+    /// <summary>The longest piece code accepted.</summary>
+    public const int MaxCodeLength = 200;
+
+    /// <summary>An operation's <c>code</c> (a piece code), trimmed; null when it has none.</summary>
+    static string? PieceCode(JsonObject op)
+    {
+        var code = Str(op, "code").Trim();
+        if (code == "")
+            return null;
+        if (code.Length > MaxCodeLength)
+            throw new OpException($"A piece code is at most {MaxCodeLength} characters.");
+        return code;
+    }
+
+    static (Stack Stack, Entry Entry)? FindCode(LoadState s, string code)
+    {
+        foreach (var stack in s.Stacks)
+            foreach (var entry in stack.Items)
+                if (code.Equals(entry.Code, StringComparison.OrdinalIgnoreCase))
+                    return (stack, entry);
+        return null;
     }
 
     static bool NameTaken(LoadState s, string name) => s.Stacks.Any(st => st.Name.Equals(name, StringComparison.OrdinalIgnoreCase));

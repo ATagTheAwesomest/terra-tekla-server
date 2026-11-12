@@ -183,24 +183,33 @@ function cleanMark(m) {
   return String(m ?? '').trim().toUpperCase().replace(/-+$/, '');
 }
 
+// A scan of a piece code (scan.code) checks off the row loaded with that code; failing that, a row
+// of its mark loaded without a code. A scan of a mark takes rows without a code first.
 function checkStatus(state) {
-  const queues = new Map();
+  const rows = [];
+  const byCode = new Map();
   let total = 0;
   for (const st of state.stacks) for (const e of st.items) {
     total++;
-    const k = cleanMark(e.mark);
-    if (!queues.has(k)) queues.set(k, []);
-    queues.get(k).push(e.id);
+    const row = { e, scan: null };
+    rows.push(row);
+    if (e.code) byCode.set(String(e.code).toUpperCase(), row);
   }
   const checked = new Map();
   let extras = 0;
+  const later = [];
   for (const scan of state.truckCheck?.scans ?? []) {
-    // A pallet is checked with one scan for all its pieces (scan.qty).
+    const row = scan.code ? byCode.get(String(scan.code).toUpperCase()) : null;
+    if (row && !row.scan) { row.scan = scan; checked.set(row.e.id, scan); } else if (row) extras++; else later.push(scan);
+  }
+  for (const scan of later) {
+    const k = cleanMark(scan.mark);
+    const free = rows.filter((r) => !r.scan && cleanMark(r.e.mark) === k).sort((a, b) => Boolean(a.e.code) - Boolean(b.e.code));
     let short = false;
+    // A pallet is checked with one scan for all its pieces (scan.qty).
     for (let i = 0; i < Math.max(1, Number(scan.qty) || 1); i++) {
-      const id = queues.get(cleanMark(scan.mark))?.shift();
-      if (id) checked.set(id, scan);
-      else short = true;
+      const r = free[i];
+      if (r && !(scan.code && r.e.code)) { r.scan = scan; checked.set(r.e.id, scan); } else short = true;
     }
     if (short) extras++;
   }
@@ -465,7 +474,84 @@ async function pageJob(job) {
       }).join('')}</tbody></table>` : '<p class="muted">No loads yet.</p>'}
     </section>
     <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
-  </div>`;
+  </div>
+  ${await codesPanel(job)}`;
+}
+
+// Piece codes (docs/PIECE-CODES.md): on some jobs every piece has its own code. Seen by anyone with
+// the key; changed with the admin code.
+async function codesPanel(job) {
+  const r = await api(`/jobs/${enc(job)}/codes?since=9007199254740991`);
+  const s = r.settings;
+  const open = Boolean(adminToken());
+  const off = open ? '' : ' disabled';
+  return `<section class="panel" id="codes-panel" data-codes-job="${esc(job)}">
+    <h2>Piece codes <span class="muted">· ${s.enabled ? 'on' : 'off'} · ${num(r.count)} code${r.count === 1 ? '' : 's'}</span></h2>
+    <p class="muted">For jobs where every piece has its own code (a mark with 40 pieces has 40 codes): scanning a code loads or truck checks that one piece. Off, the job works by mark as usual.${open ? '' : ' Changing this needs the admin code.'}</p>
+    ${open ? '' : '<p><button class="btn" type="button" data-unlock>Enter code to change</button></p>'}
+    <form id="form-codes" class="codes-form">
+      <label class="check"><input type="checkbox" id="codes-enabled"${s.enabled ? ' checked' : ''}${off}> Piece codes on for job ${esc(job)}</label>
+      <div class="field"><label for="codes-pattern">What a code looks like</label>
+        <input type="text" id="codes-pattern" value="${esc(s.pattern)}" spellcheck="false" autocomplete="off"${off}>
+        <div class="help">A regex. A scan the job's list doesn't have yet counts as a code when it matches this, and as a mark when it doesn't. Blank: <code>${esc('^[A-Za-z0-9]{12,}$')}</code> (12 or more letters and digits, no dashes). A named group <code>(?&lt;code&gt;…)</code> takes just that part of the scan, e.g. <code>${esc('id=(?<code>[A-Z0-9]+)')}</code> for a QR code holding a link.</div></div>
+      <label class="check"><input type="checkbox" id="codes-learn"${s.learn ? ' checked' : ''}${off}> A code not on the list is paired on the iPad (scan the code, then its mark). Off: it is refused.</label>
+      <p><button class="btn primary" type="submit"${off}>Save</button> <span id="codes-saved" class="muted"></span></p>
+    </form>
+    <h3>Add codes</h3>
+    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence (sequence is optional). Paste from a spreadsheet works too."${off}></textarea>
+    <label class="check"><input type="checkbox" id="codes-overwrite"${off}> Move a code already paired with another mark to the mark in this list</label>
+    <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
+      <button class="btn" type="button" data-codes-clear${off || (r.count ? '' : ' disabled')}>Remove all ${num(r.count)} codes</button></p>
+    <div id="codes-out"></div>
+  </section>`;
+}
+
+async function saveCodeSettings() {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#codes-saved');
+  out.textContent = 'Saving…';
+  try {
+    await api(`/admin/jobs/${enc(job)}/codes/settings`, { method: 'PUT', body: { enabled: $('#codes-enabled').checked, pattern: $('#codes-pattern').value.trim(), learn: $('#codes-learn').checked } });
+    await draw();
+    $('#codes-saved').textContent = 'Saved. The iPads use it now.';
+  } catch (err) {
+    out.textContent = err.message;
+    out.className = 'error';
+  }
+}
+
+async function importCodes() {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#codes-out');
+  out.textContent = 'Adding…';
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes/import`, { method: 'POST', body: { text: $('#codes-text').value, overwrite: $('#codes-overwrite').checked } });
+    const lines = [`Read ${num(r.read)} line${r.read === 1 ? '' : 's'}: ${num(r.added)} added, ${num(r.updated)} changed, ${num(r.unchanged)} already there.`];
+    if (r.conflictCount) lines.push(`${num(r.conflictCount)} already paired with another mark, left as they were (tick “Move a code…” to change them): ${r.conflicts.map((c) => `${esc(c.code)} is ${esc(c.mark)}, not ${esc(c.wanted)}`).join('; ')}`);
+    if (r.errorCount) lines.push(`${num(r.errorCount)} line${r.errorCount === 1 ? '' : 's'} skipped: ${r.errors.map(esc).join(' ')}`);
+    await draw();
+    $('#codes-out').innerHTML = lines.map((l, i) => `<p class="${i ? 'error' : 'ok-text'}">${l}</p>`).join('');
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+let clearArmedAt = 0;
+async function clearCodes(btn) {
+  const job = $('#codes-panel').dataset.codesJob;
+  if (Date.now() - clearArmedAt > 5000) {
+    clearArmedAt = Date.now();
+    btn.textContent = 'Tap again to remove them all';
+    return;
+  }
+  clearArmedAt = 0;
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes`, { method: 'DELETE' });
+    await draw();
+    $('#codes-out').innerHTML = `<p class="ok-text">Removed ${num(r.removed)} codes.</p>`;
+  } catch (err) {
+    $('#codes-out').innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
 }
 
 async function pageLoad(loadId, query) {
@@ -486,7 +572,7 @@ async function pageLoad(loadId, query) {
       ${st.items.map((e, i) => {
         const scan = check.checked.get(e.id);
         return `<tr class="${e.pending ? 'pending' : ''}${e.manual ? ' manual' : ''}">
-          <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a></td><td>${esc(e.sequence)}</td>
+          <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a>${e.code ? `<br><span class="muted code">${esc(e.code)}</span>` : ''}</td><td>${esc(e.sequence)}</td>
           <td>${e.pending ? 'Waiting on PowerFab…' : e.removing ? 'Being taken off…' : esc(e.description ?? '')}${e.manual ? ' <span class="pill warn">typed</span>' : ''}</td>
           <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td>${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
           ${state.truckCheck ? `<td>${scan ? `✓ ${who(scan.scannedBy, 'solo')}` : ''}</td>` : ''}</tr>`;
@@ -1255,7 +1341,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1386,6 +1472,11 @@ function bind() {
       }
       return;
     }
+    if (e.target.id === 'form-codes') {
+      e.preventDefault();
+      saveCodeSettings();
+      return;
+    }
     if (e.target.id === 'form-merge') {
       e.preventDefault();
       mergeDevice(e.target);
@@ -1414,6 +1505,8 @@ function bind() {
       else window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
+    if (t.closest('[data-codes-import]')) { importCodes(); return; }
+    if (t.closest('[data-codes-clear]')) { clearCodes(t.closest('[data-codes-clear]')); return; }
     if (t.closest('[data-show-qr]')) { showSetupQr(); return; }
     if (t.closest('[data-hide-qr]')) { qrHtml = ''; $('#setup-qr').innerHTML = QR_BUTTON; return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }

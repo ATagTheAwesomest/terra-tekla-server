@@ -270,3 +270,11 @@ tr.not-pf td:first-child b { color: var(--muted); }
 .btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, transparent); }
 p.path { word-break: break-all; }
 .photo .cap .btn { display: inline-flex; width: auto; aspect-ratio: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+
+/* Piece codes on a job's page */
+#codes-panel { margin-top: 1.25rem; }
+.codes-form { display: grid; gap: .8rem; max-width: 52rem; }
+#codes-panel label.check { display: flex; gap: .5rem; align-items: center; }
+#codes-panel label.check input { width: 20px; height: 20px; }
+#codes-panel textarea { width: 100%; max-width: 52rem; font: .95rem ui-monospace, monospace; color: var(--text); background: #0e0e0e; border: 1px solid #444; border-radius: 6px; padding: .5rem .7rem; }
+#codes-panel .codes-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
