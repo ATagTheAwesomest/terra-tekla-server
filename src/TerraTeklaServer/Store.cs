@@ -50,6 +50,7 @@ public sealed class Store
         AddColumn(db, "photos", "device_number", "INTEGER");
         AddColumn(db, "entries", "code", "TEXT");
         AddColumn(db, "check_scans", "code", "TEXT");
+        AddColumn(db, "piece_codes", "status", "TEXT");
         Exec(db, IndexesAfterColumns);
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
     }
@@ -526,19 +527,19 @@ public sealed class Store
     public List<PieceCode> Codes(string job, long since = 0, int limit = 100_000)
     {
         using var db = Open();
-        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by FROM piece_codes WHERE job = $job AND id > $since ORDER BY id LIMIT $limit",
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND id > $since ORDER BY id LIMIT $limit",
             ReadCode, ("$job", job), ("$since", since), ("$limit", Math.Clamp(limit, 1, 100_000)));
     }
 
     public PieceCode? FindCode(string job, string code)
     {
         using var db = Open();
-        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by FROM piece_codes WHERE job = $job AND code = $code",
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND code = $code",
             ReadCode, ("$job", job), ("$code", code.Trim())).FirstOrDefault();
     }
 
     static PieceCode ReadCode(SqliteDataReader r) =>
-        new(r.GetInt64(0), r.GetString(1), r.GetString(2), N(r, 3), r.GetString(4), r.GetString(5), N(r, 6));
+        new(r.GetInt64(0), r.GetString(1), r.GetString(2), N(r, 3), r.GetString(4), r.GetString(5), N(r, 6), N(r, 7));
 
     /// <summary>
     /// Adds codes to a job. A code already there with the same mark is left as it is (its sequence is
@@ -553,10 +554,10 @@ public sealed class Store
         var now = DateTime.UtcNow.ToString("o");
         int added = 0, updated = 0, unchanged = 0;
         var conflicts = new List<CodeConflict>();
-        using var find = Prepare(db, "SELECT mark, sequence FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
+        using var find = Prepare(db, "SELECT mark, sequence, status FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
         using var delete = Prepare(db, "DELETE FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
-        using var insert = Prepare(db, "INSERT INTO piece_codes (job, code, mark, sequence, source, added_at, added_by) VALUES ($job, $code, $mark, $seq, $source, $at, $by)",
-            "$job", "$code", "$mark", "$seq", "$source", "$at", "$by");
+        using var insert = Prepare(db, "INSERT INTO piece_codes (job, code, mark, sequence, source, added_at, added_by, status) VALUES ($job, $code, $mark, $seq, $source, $at, $by, $status)",
+            "$job", "$code", "$mark", "$seq", "$source", "$at", "$by", "$status");
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var line in lines)
         {
@@ -566,12 +567,13 @@ public sealed class Store
                 continue;
             find.Parameters[0].Value = job;
             find.Parameters[1].Value = code;
-            string? oldMark = null, oldSeq = null;
+            string? oldMark = null, oldSeq = null, oldStatus = null;
             using (var r = find.ExecuteReader())
                 if (r.Read())
                 {
                     oldMark = r.GetString(0);
                     oldSeq = N(r, 1);
+                    oldStatus = N(r, 2);
                 }
             if (oldMark is not null)
             {
@@ -581,17 +583,17 @@ public sealed class Store
                     conflicts.Add(new CodeConflict(code, oldMark, mark));
                     continue;
                 }
-                if (sameMark && (line.Sequence is null || line.Sequence == oldSeq))
+                if (sameMark && (line.Sequence is null || line.Sequence == oldSeq) && (line.Status is null || line.Status == oldStatus))
                 {
                     unchanged++;
                     continue;
                 }
                 Run(delete, job, code);
-                Run(insert, job, code, mark, line.Sequence ?? (sameMark ? oldSeq : null), source, now, by.Id);
+                Run(insert, job, code, mark, line.Sequence ?? (sameMark ? oldSeq : null), source, now, by.Id, line.Status ?? oldStatus);
                 updated++;
                 continue;
             }
-            Run(insert, job, code, mark, line.Sequence, source, now, by.Id);
+            Run(insert, job, code, mark, line.Sequence, source, now, by.Id, line.Status);
             added++;
         }
         var count = added + updated;
@@ -602,7 +604,7 @@ public sealed class Store
                     ? $"Paired code {lines[0].Code.Trim()} with {CodeList.CleanMark(lines[0].Mark)}"
                     : $"Piece codes for job {job}: {added} added, {updated} changed, {unchanged} already there{(conflicts.Count > 0 ? $", {conflicts.Count} paired with another mark (left as they were)" : "")}");
         tx.Commit();
-        var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
+        var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
             ReadCode, ("$job", job), ("$at", now));
         return new CodesAdded(added, updated, unchanged, conflicts, fresh);
     }

@@ -406,7 +406,7 @@ api.MapPost("/loads/{loadId}/ops/batch", async (string loadId, JsonObject body, 
 
 // ---- Piece codes (docs/PIECE-CODES.md) --------------------------------------------------------
 
-static object CodeView(PieceCode c) => new { id = c.Id, code = c.Code, mark = c.Mark, sequence = c.Sequence, source = c.Source };
+static object CodeView(PieceCode c) => new { id = c.Id, code = c.Code, mark = c.Mark, sequence = c.Sequence, source = c.Source, status = c.Status };
 
 // A job's piece code settings and its codes added after `since` (the app keeps a copy and asks for
 // what is new). `last` is the newest code's id: the next `since`.
@@ -429,6 +429,7 @@ api.MapGet("/jobs/{job}/codes/{code}", (string job, string code) =>
         mark = found?.Mark ?? on?.Mark,
         sequence = found?.Sequence,
         source = found?.Source,
+        status = found?.Status,
         load = on is { } o ? new { loadId = o.LoadId, loadNumber = o.LoadNumber } : null,
     }, Json.Options);
 });
@@ -589,7 +590,8 @@ admin.MapPut("/jobs/{job}/codes/settings", (string job, PieceCodeSettings body, 
     }
 });
 
-// Body: {"text": "code,mark[,sequence] per line", "overwrite": true}. Overwrite moves a code already
+// Body: {"text": an export with a header line (Barcode, Assembly, Sequence, Status, ...) or
+// "code,mark[,sequence]" per line, "overwrite": true}. Overwrite moves a code already
 // paired with another mark to the mark in the list.
 admin.MapPost("/jobs/{job}/codes/import", (string job, CodeImport body, HttpContext http) =>
 {
@@ -609,6 +611,8 @@ admin.MapPost("/jobs/{job}/codes/import", (string job, CodeImport body, HttpCont
         conflictCount = result.Conflicts.Count,
         errors = errors.Take(50),
         errorCount = errors.Count,
+        statuses = lines.Where(l => l.Status is not null).GroupBy(l => l.Status!).ToDictionary(g => g.Key, g => g.Count()),
+        suggestedPattern = CodeList.SuggestPattern(lines),
     }, Json.Options);
 });
 

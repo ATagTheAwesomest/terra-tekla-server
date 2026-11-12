@@ -498,6 +498,8 @@ async function codesPanel(job) {
       <p><button class="btn primary" type="submit"${off}>Save</button> <span id="codes-saved" class="muted"></span></p>
     </form>
     <h3>Add codes</h3>
+    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status…), or paste one code per line: code, mark, sequence. Importing the same export again later refreshes each piece's status.</p>
+    <p><input type="file" id="codes-file" accept=".csv,.txt,.tsv,text/csv,text/plain"${off}></p>
     <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence (sequence is optional). Paste from a spreadsheet works too."${off}></textarea>
     <label class="check"><input type="checkbox" id="codes-overwrite"${off}> Move a code already paired with another mark to the mark in this list</label>
     <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
@@ -529,8 +531,15 @@ async function importCodes() {
     const lines = [`Read ${num(r.read)} line${r.read === 1 ? '' : 's'}: ${num(r.added)} added, ${num(r.updated)} changed, ${num(r.unchanged)} already there.`];
     if (r.conflictCount) lines.push(`${num(r.conflictCount)} already paired with another mark, left as they were (tick “Move a code…” to change them): ${r.conflicts.map((c) => `${esc(c.code)} is ${esc(c.mark)}, not ${esc(c.wanted)}`).join('; ')}`);
     if (r.errorCount) lines.push(`${num(r.errorCount)} line${r.errorCount === 1 ? '' : 's'} skipped: ${r.errors.map(esc).join(' ')}`);
+    const statuses = Object.entries(r.statuses ?? {});
+    const pattern = $('#codes-pattern')?.value.trim();
     await draw();
-    $('#codes-out').innerHTML = lines.map((l, i) => `<p class="${i ? 'error' : 'ok-text'}">${l}</p>`).join('');
+    let html = lines.map((l, i) => `<p class="${i ? 'error' : 'ok-text'}">${l}</p>`).join('');
+    if (statuses.length) html += `<p class="muted">Status in the list: ${statuses.map(([k, n]) => `${esc(k)} ${num(n)}`).join(' · ')}</p>`;
+    if (r.suggestedPattern && r.suggestedPattern !== pattern) {
+      html += `<p class="muted">These codes all look like <code>${esc(r.suggestedPattern)}</code>. <button class="btn" type="button" data-codes-pattern="${esc(r.suggestedPattern)}">Use it as the code pattern</button></p>`;
+    }
+    $('#codes-out').innerHTML = html;
   } catch (err) {
     out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
   }
@@ -1486,6 +1495,15 @@ function bind() {
     e.preventDefault();
     saveDevice(e.target, { name: $('#device-name').value });
   });
+  $('#main').addEventListener('change', async (e) => {
+    if (e.target.id !== 'codes-file' || !e.target.files?.[0]) return;
+    // Reads the export here and puts it in the box, so what will be added can be seen first.
+    const file = e.target.files[0];
+    if (file.size > 20 * 1024 * 1024) { $('#codes-out').innerHTML = '<p class="error">That file is over 20 MB.</p>'; return; }
+    $('#codes-text').value = await file.text();
+    const rows = $('#codes-text').value.split('\n').filter((l) => l.trim()).length;
+    $('#codes-out').innerHTML = `<p class="muted">${esc(file.name)}: ${num(Math.max(rows - 1, 0))} rows read. Press “Add to the list”.</p>`;
+  });
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
     if (e.target.id === 'photo-job-filter') { photoJobFilter = e.target.value; filterPhotoJobs(); }
@@ -1507,6 +1525,7 @@ function bind() {
     }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
     if (t.closest('[data-codes-clear]')) { clearCodes(t.closest('[data-codes-clear]')); return; }
+    if (t.closest('[data-codes-pattern]')) { $('#codes-pattern').value = t.closest('[data-codes-pattern]').dataset.codesPattern; saveCodeSettings(); return; }
     if (t.closest('[data-show-qr]')) { showSetupQr(); return; }
     if (t.closest('[data-hide-qr]')) { qrHtml = ''; $('#setup-qr').innerHTML = QR_BUTTON; return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }

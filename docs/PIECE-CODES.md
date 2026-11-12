@@ -26,6 +26,27 @@ Jobs › the job › **Piece codes** (changing it needs the admin code):
 
 An API can fill the same list later: it would call the same code as the import (`Store.AddCodes`).
 
+## Importing an export
+
+The admin board's **Add codes** takes a file (or a paste) of either kind:
+
+- **An export with a first line naming its columns**, like the facility portal's
+  `Status, Sequence, Assembly, Barcode, Description, ...`. The code column (Barcode, Code, Serial,
+  Tag, ...) and the mark column (Assembly, Mark, Main Mk, ...) are found by name; Sequence and
+  Status are kept when there; other columns are ignored. Values in double quotes may hold commas.
+- **A plain list**, one `code, mark[, sequence]` per line.
+
+Importing the same export again later refreshes it: each piece's status and sequence are updated,
+codes already there are left as they are, and new ones are added (tick "Move a code..." to also move
+codes the export now gives another mark). Nothing is removed by a re-import.
+
+After an import the board shows how many pieces have each status, and, when every code has the
+same shape, a pattern for them (for example `^C\d{7}Q\d$` for `C9227621Q1`) with a button to use it.
+
+The facility export's **Assembly** is the PowerFab main mark (for example `10121601`), so no mapping
+is needed. A piece's **Status** from the list (for example "Shipped to treatment") is shown on the
+handheld when its code is scanned, in orange when it says shipped. It never blocks a scan.
+
 ## On the iPads and handhelds
 
 - **Loading**: scanning a code loads one piece of its mark, exactly as scanning the mark does, and the

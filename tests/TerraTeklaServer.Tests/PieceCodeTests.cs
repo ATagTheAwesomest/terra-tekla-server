@@ -116,6 +116,46 @@ public sealed class PieceCodeTests : IDisposable
         Assert.Equal(PieceCodeSettings.DefaultPattern, PieceCodeSettings.CheckPattern(" "));
     }
 
+    // The facility portal's export: columns found by name, a byte order mark, values with ";" in them.
+    const string Export = "\uFEFFStatus,Sequence,Assembly,Barcode,Description,Length (mm),Weight (lbs),Area (ft²),Finish,Status Date\r\n"
+        + "Not started,1012,10121601,C9227621Q1,HSS 6X6X1/2 A500C,7689.85,897.187,51.918,SSPC-SP2; ONE Coat System,\r\n"
+        + "Not started,1012,10124520,C9227623Q1,HSS 6X6X1/2 A500C,3033.71,350.747,19.906,SSPC-SP2; ONE Coat System,\r\n"
+        + "Shipped to treatment,1012,10124520,C9227624Q1,\"HSS 6X6X1/2, A500C\",3033.71,350.747,19.906,SSPC-SP2; Galvanized,2026-11-02T23:57:04.441Z\r\n";
+
+    [Fact]
+    public void ReadsTheFacilityExport()
+    {
+        var (lines, errors) = CodeList.Parse(Export);
+        Assert.Empty(errors);
+        Assert.Equal([
+            new CodeLine("C9227621Q1", "10121601", "1012", "Not started"),
+            new CodeLine("C9227623Q1", "10124520", "1012", "Not started"),
+            new CodeLine("C9227624Q1", "10124520", "1012", "Shipped to treatment")], lines);
+        Assert.Equal(@"^C\d{7}Q\d$", CodeList.SuggestPattern(lines));
+        Assert.Null(CodeList.SuggestPattern([new CodeLine("AB12", "M", null), new CodeLine("1234", "M", null)]));
+        var (_, bad) = CodeList.Parse("Status,Barcode,Description\nNot started,C9227621Q1,x\n");
+        Assert.Single(bad);
+    }
+
+    [Fact]
+    public async Task ImportingTheExportAgainRefreshesStatus()
+    {
+        var admin = Client(null, await AdminToken());
+        var first = await (await admin.PostAsJsonAsync("/api/admin/jobs/J9/codes/import", new { text = Export })).Content.ReadFromJsonAsync<JsonObject>();
+        Assert.Equal(3, (int)first!["added"]!);
+        Assert.Equal(@"^C\d{7}Q\d$", (string)first["suggestedPattern"]!);
+        Assert.Equal(1, (int)first["statuses"]!["Shipped to treatment"]!);
+
+        var again = await (await admin.PostAsJsonAsync("/api/admin/jobs/J9/codes/import",
+            new { text = Export.Replace("Not started,1012,10121601", "Fabrication Complete,1012,10121601"), overwrite = true })).Content.ReadFromJsonAsync<JsonObject>();
+        Assert.Equal(1, (int)again!["updated"]!);
+        Assert.Equal(2, (int)again["unchanged"]!);
+
+        var code = await Client().GetFromJsonAsync<JsonObject>("/api/jobs/J9/codes/C9227621Q1");
+        Assert.Equal("Fabrication Complete", (string)code!["status"]!);
+        Assert.Equal("10121601", (string)code["mark"]!);
+    }
+
     // ---- Through the API --------------------------------------------------------------------
 
     [Fact]
