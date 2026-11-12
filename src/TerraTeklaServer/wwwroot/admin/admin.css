@@ -278,3 +278,9 @@ p.path { word-break: break-all; }
 #codes-panel label.check input { width: 20px; height: 20px; }
 #codes-panel textarea { width: 100%; max-width: 52rem; font: .95rem ui-monospace, monospace; color: var(--text); background: #0e0e0e; border: 1px solid #444; border-radius: 6px; padding: .5rem .7rem; }
 #codes-panel .codes-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+
+.bom-info { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0 12px; }
+.bom-info dt { color: var(--muted, #999); }
+.bom-info dd { margin: 0; }
+.open-job { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+.open-job input { width: 12em; }

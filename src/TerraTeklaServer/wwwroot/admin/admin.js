@@ -444,9 +444,11 @@ async function pageJobs() {
     ${r.ok ? `<p class="muted">Every job PowerFab gives this server's PowerFab user, open or closed: the same list the iPads pick from. Read ${esc(when(r.fetchedAt))}.</p>`
       : `<div class="banner bad"><span>Couldn’t read PowerFab’s job list: ${esc(r.error)}</span><a class="btn" href="#/settings">Settings</a></div>`}
     <input class="filter" type="search" id="job-filter" placeholder="Filter jobs" value="${esc(jobFilter)}" autocomplete="off">
+    <form class="open-job" id="form-open-job"><span class="muted">A job PowerFab doesn’t list yet (to put in its piece codes or BOM ahead of time):</span>
+      <input type="text" id="open-job" placeholder="Job number" autocomplete="off" spellcheck="false"> <button class="btn" type="submit">Open</button></form>
     ${r.jobs.length ? `<div style="overflow-x:auto"><table id="jobs-table"><thead><tr><th>Job</th><th>Description</th><th>Location</th><th class="num">Loads here</th><th class="num">Pieces in stacks</th><th>Last activity</th>${r.photosEnabled ? '<th>Photos go to</th>' : ''}</tr></thead><tbody>
     ${r.jobs.map((j) => `<tr class="${j.inPowerFab ? '' : 'not-pf'}" data-search="${esc(`${j.job} ${j.description} ${j.location}`.toLowerCase())}">
-      <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks for it but PowerFab didn’t list it">not in PowerFab</span>'}</td>
+      <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks, piece codes or a BOM for it, but PowerFab didn’t list it">not in PowerFab</span>'}</td>
       <td>${esc(j.description)}</td><td>${esc(j.location)}</td>
       <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
       ${r.photosEnabled ? `<td class="path">${j.photoError ? `<span class="error">${esc(j.photoError)}</span>` : `${esc(j.photoFolder ?? '')}<br><span class="muted">${j.photoRule === 'default' ? 'default' : `rule ${esc(j.photoRule ?? '')}`}</span>`}</td>` : ''}
@@ -475,7 +477,71 @@ async function pageJob(job) {
     </section>
     <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
   </div>
+  ${await bomPanel(job)}
   ${await codesPanel(job)}`;
+}
+
+// The job's BOM slot (docs/JOB-BOM.md): the workbook the BOM script makes, for transmittals and
+// other details PowerFab doesn't have. Information only.
+async function bomPanel(job) {
+  let info = null;
+  try { info = (await api(`/jobs/${enc(job)}/bom/info`)).info; } catch { /* 404: empty slot */ }
+  const open = Boolean(adminToken());
+  const off = open ? '' : ' disabled';
+  return `<section class="panel" id="bom-panel" data-bom-job="${esc(job)}">
+    <h2>BOM <span class="muted">· ${info ? `${num(info.assemblies)} assemblies` : 'none yet'}</span></h2>
+    <p class="muted">The BOM workbook for this job (the “Master BOM” sheet is read). It tells the iPads which transmittal each assembly is in, with its due date, paint / notes and revision. Information only: it never changes scanning or shipping. Upload again when there’s a newer one.${open ? '' : ' Changing it needs the admin code.'}</p>
+    ${info ? `<dl class="bom-info">
+      <dt>File</dt><dd>${esc(info.fileName)}</dd>
+      <dt>Uploaded</dt><dd>${esc(when(info.uploadedAt))}${info.uploadedBy ? ` by ${esc(info.uploadedBy)}` : ''}</dd>
+      <dt>Transmittals</dt><dd>${info.transmittals.length ? info.transmittals.map(esc).join(', ') : '<span class="muted">none in the file</span>'}</dd>
+      ${info.bomJob ? `<dt>BOM’s job #</dt><dd>${esc(info.bomJob)}${info.bomJob.toUpperCase() !== job.toUpperCase() ? ' <span class="pill warn">not this job</span>' : ''}</dd>` : ''}
+    </dl>` : ''}
+    ${open ? '' : '<p><button class="btn" type="button" data-unlock>Enter code to change</button></p>'}
+    <form id="form-bom" class="codes-form"><p><input type="file" id="bom-file" accept=".xlsx,.csv,.txt,.tsv"${off}>
+      <button class="btn primary" type="submit"${off}>Upload</button>
+      ${info ? `<button class="btn" type="button" data-bom-clear${off}>Remove</button>` : ''}</p></form>
+    <div id="bom-out"></div>
+  </section>`;
+}
+
+async function uploadBom() {
+  const job = $('#bom-panel').dataset.bomJob;
+  const file = $('#bom-file').files?.[0];
+  const out = $('#bom-out');
+  if (!file) { out.innerHTML = '<p class="error">Pick the BOM file first.</p>'; return; }
+  out.textContent = 'Reading…';
+  try {
+    const res = await fetch(`/api/admin/jobs/${enc(job)}/bom`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key()}`, 'X-Terra-Admin': adminToken(), 'X-File-Name': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(r.detail || r.title || `Server error ${res.status}`);
+    await draw();
+    $('#bom-out').innerHTML = `<p class="ok-text">Read ${num(r.info.assemblies)} assemblies from ${num(r.info.lines)} lines${r.info.sheet ? ` (sheet “${esc(r.info.sheet)}”)` : ''}.</p>`
+      + (r.otherJob ? `<p class="error">The BOM says it is for job ${esc(r.otherJob)}, not ${esc(job)}. Check it’s in the right job.</p>` : '');
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+let bomClearArmedAt = 0;
+async function clearBom(btn) {
+  const job = $('#bom-panel').dataset.bomJob;
+  if (Date.now() - bomClearArmedAt > 5000) {
+    bomClearArmedAt = Date.now();
+    btn.textContent = 'Tap again to remove it';
+    return;
+  }
+  bomClearArmedAt = 0;
+  try {
+    await api(`/admin/jobs/${enc(job)}/bom`, { method: 'DELETE' });
+    await draw();
+  } catch (err) {
+    $('#bom-out').innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
 }
 
 // Piece codes (docs/PIECE-CODES.md): on some jobs every piece has its own code. Seen by anyone with
@@ -535,7 +601,8 @@ async function importCodes() {
     const pattern = $('#codes-pattern')?.value.trim();
     await draw();
     let html = lines.map((l, i) => `<p class="${i ? 'error' : 'ok-text'}">${l}</p>`).join('');
-    if (statuses.length) html += `<p class="muted">Status in the list: ${statuses.map(([k, n]) => `${esc(k)} ${num(n)}`).join(' · ')}</p>`;
+    if (r.bom && r.bom.inBom < r.bom.marks) html += `<p class="${r.bom.inBom * 2 < r.bom.marks ? 'error' : 'muted'}">${num(r.bom.inBom)} of the list’s ${num(r.bom.marks)} marks are in this job’s BOM.${r.bom.inBom * 2 < r.bom.marks ? ' Is this list for another job?' : ''}</p>`;
+    if (statuses.length) html += `<p class="muted">Status in the file (kept, but not shown on the iPads: it isn’t live): ${statuses.map(([k, n]) => `${esc(k)} ${num(n)}`).join(' · ')}</p>`;
     if (r.suggestedPattern && r.suggestedPattern !== pattern) {
       html += `<p class="muted">These codes all look like <code>${esc(r.suggestedPattern)}</code>. <button class="btn" type="button" data-codes-pattern="${esc(r.suggestedPattern)}">Use it as the code pattern</button></p>`;
     }
@@ -1350,7 +1417,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1466,6 +1533,17 @@ function bind() {
     start();
   });
   $('#main').addEventListener('submit', async (e) => {
+    if (e.target.id === 'form-open-job') {
+      e.preventDefault();
+      const job = $('#open-job').value.trim();
+      if (job) location.hash = `#/job/${enc(job)}`;
+      return;
+    }
+    if (e.target.id === 'form-bom') {
+      e.preventDefault();
+      uploadBom();
+      return;
+    }
     if (e.target.id === 'form-settings') {
       e.preventDefault();
       const out = $('#settings-saved');
@@ -1524,6 +1602,7 @@ function bind() {
       return;
     }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
+    if (t.closest('[data-bom-clear]')) { clearBom(t.closest('[data-bom-clear]')); return; }
     if (t.closest('[data-codes-clear]')) { clearCodes(t.closest('[data-codes-clear]')); return; }
     if (t.closest('[data-codes-pattern]')) { $('#codes-pattern').value = t.closest('[data-codes-pattern]').dataset.codesPattern; saveCodeSettings(); return; }
     if (t.closest('[data-show-qr]')) { showSetupQr(); return; }

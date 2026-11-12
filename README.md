@@ -37,6 +37,7 @@ iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conve
 - [docs/PHOTOS.md](docs/PHOTOS.md): photo settings, folder rules, naming, the photo API.
 - [docs/PIECE-CODES.md](docs/PIECE-CODES.md): jobs where every piece has its own code: switching it
   on, the code list, pairing, loading and truck checking by code, the API.
+- [docs/JOB-BOM.md](docs/JOB-BOM.md): a slot per job for its BOM workbook (transmittals, due dates, paint).
 - [docs/MIGRATION.md](docs/MIGRATION.md): moving from the old setup (conversion layer on the internet,
   app on GitHub Pages) to this server: `windows\migrate-from-conversion-layer.ps1`, the Cloudflare
   hostname, paths and settings, Cloudflare Access, the iPads and the admin board, what data carries over.

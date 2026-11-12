@@ -156,6 +156,66 @@ public sealed class PieceCodeTests : IDisposable
         Assert.Equal("10121601", (string)code["mark"]!);
     }
 
+    // ---- Job BOM (docs/JOB-BOM.md) ----------------------------------------------------------
+
+    static byte[] SampleBom() => File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "sample-bom.xlsx"));
+
+    [Fact]
+    public void Reads_the_master_bom_sheet_of_a_workbook()
+    {
+        var (rows, info) = BomReader.Read(SampleBom(), "Job BOM.xlsx");
+        Assert.Equal("Master BOM", info.Sheet);
+        Assert.Equal("26102", info.BomJob);
+        Assert.Equal("SAMPLE PROJECT", info.Project);
+        Assert.Equal(["TL1282", "TLR1361"], info.Transmittals);
+        Assert.Equal(2, info.Assemblies);
+        Assert.Equal(3, info.Lines);
+        var a = rows.Single(r => r.Mark == "52031000");
+        Assert.Equal(("TLR1361", "5203", "REV", "TL1282", "12/21/26", "GREY PAINT", 2, 746.69, true),
+            (a.Transmittal, a.Sequence, a.Rev, a.Revises, a.Due, a.Notes, a.Qty, a.Weight, a.Exception));
+        Assert.Equal("520301-02", a.Drawing);
+        Assert.Equal("HSS6 x 6 x 3/8", a.Description);
+        Assert.False(rows.Single(r => r.Mark == "52031002").Exception);
+
+        var (csv, _) = BomReader.Read(System.Text.Encoding.UTF8.GetBytes("Assembly,Transmittal,Sequence,Paint / Notes\n1001-c1,TL1,1,\"GREY, 2 COATS\"\n"), "bom.csv");
+        Assert.Equal(new BomRow("1001-C1", "TL1", "1", null, null, null, null, "GREY, 2 COATS", null, null, null, null, false), csv.Single());
+        Assert.Throws<BomException>(() => BomReader.Read("hello"u8.ToArray(), "x.csv"));
+        Assert.Throws<BomException>(() => BomReader.Read([(byte)'P', (byte)'K', 3, 4, 0, 0], "x.xlsx"));
+    }
+
+    [Fact]
+    public async Task A_bom_goes_in_a_jobs_slot_and_the_ipads_read_it()
+    {
+        var admin = Client(null, await AdminToken());
+        var ipad = Client();
+        Assert.Equal(HttpStatusCode.NotFound, (await ipad.GetAsync("/api/jobs/26102/bom")).StatusCode);
+        var upload = new ByteArrayContent(SampleBom());
+        upload.Headers.Add("X-File-Name", Uri.EscapeDataString("Job BOM.xlsx"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await ipad.PostAsync("/api/admin/jobs/26102/bom", upload)).StatusCode);
+
+        upload = new ByteArrayContent(SampleBom());
+        upload.Headers.Add("X-File-Name", Uri.EscapeDataString("Job BOM.xlsx"));
+        var put = await (await admin.PostAsync("/api/admin/jobs/26418/bom", upload)).Content.ReadFromJsonAsync<JsonObject>();
+        Assert.Equal("26102", (string)put!["otherJob"]!);
+
+        var read = await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/26418/bom");
+        Assert.Equal("Job BOM.xlsx", (string)read!["info"]!["fileName"]!);
+        Assert.Equal(2, read["rows"]!.AsArray().Count);
+        var one = await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/26418/bom?mark=52031002");
+        Assert.Equal("TL1282", (string)one!["rows"]![0]!["transmittal"]!);
+        Assert.Equal("26102", (string)(await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/26418/bom/info"))!["info"]!["bomJob"]!);
+
+        // A code list checked against it.
+        var import = await (await admin.PostAsJsonAsync("/api/admin/jobs/26418/codes/import", new { text = "code,mark\nC0000001Q1,52031000\nC0000002Q1,99999999" })).Content.ReadFromJsonAsync<JsonObject>();
+        Assert.Equal(1, (int)import!["bom"]!["inBom"]!);
+        Assert.Equal(2, (int)import["bom"]!["marks"]!);
+        var codes = await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/26418/marks/52031000/codes");
+        Assert.Equal("C0000001Q1", (string)codes!["codes"]![0]!["code"]!);
+
+        (await admin.DeleteAsync("/api/admin/jobs/26418/bom")).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.NotFound, (await ipad.GetAsync("/api/jobs/26418/bom")).StatusCode);
+    }
+
     // ---- Through the API --------------------------------------------------------------------
 
     [Fact]

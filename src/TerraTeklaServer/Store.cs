@@ -51,6 +51,7 @@ public sealed class Store
         AddColumn(db, "entries", "code", "TEXT");
         AddColumn(db, "check_scans", "code", "TEXT");
         AddColumn(db, "piece_codes", "status", "TEXT");
+        AddColumn(db, "job_settings", "bom", "TEXT");
         Exec(db, IndexesAfterColumns);
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
     }
@@ -107,6 +108,9 @@ public sealed class Store
         CREATE INDEX IF NOT EXISTS piece_codes_mark ON piece_codes (job, mark COLLATE NOCASE);
         CREATE TABLE IF NOT EXISTS job_settings (
             job TEXT PRIMARY KEY COLLATE NOCASE, piece_codes TEXT, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS job_bom (
+            job TEXT NOT NULL COLLATE NOCASE, mark TEXT NOT NULL COLLATE NOCASE, transmittal TEXT NOT NULL COLLATE NOCASE,
+            row TEXT NOT NULL, PRIMARY KEY (job, mark, transmittal));
         """;
 
     // Indexes on columns added by AddColumn (databases made before them get the column first).
@@ -607,6 +611,74 @@ public sealed class Store
         var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
             ReadCode, ("$job", job), ("$at", now));
         return new CodesAdded(added, updated, unchanged, conflicts, fresh);
+    }
+
+    // ---- Job BOM (JobBom.cs) ----------------------------------------------------------------
+
+    /// <summary>Puts a BOM in a job's slot, replacing the one there.</summary>
+    public BomInfo SaveBom(string job, List<BomRow> rows, BomInfo info, Device by)
+    {
+        info = info with { UploadedBy = by.Name };
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        Exec(db, "DELETE FROM job_bom WHERE job = $job", ("$job", job));
+        using var insert = Prepare(db, "INSERT OR REPLACE INTO job_bom (job, mark, transmittal, row) VALUES ($job, $mark, $tl, $row)", "$job", "$mark", "$tl", "$row");
+        foreach (var r in rows)
+            Run(insert, job, r.Mark, r.Transmittal ?? "", JsonSerializer.Serialize(r, Json.Options));
+        Exec(db, """
+            INSERT INTO job_settings (job, bom, updated_at) VALUES ($job, $json, $at)
+            ON CONFLICT (job) DO UPDATE SET bom = $json, updated_at = $at
+            """, ("$job", job), ("$json", JsonSerializer.Serialize(info, Json.Options)), ("$at", info.UploadedAt));
+        AddActivity(db, info.UploadedAt, by, "bom", job, null, null, null, null, null,
+            $"BOM for job {job}: {info.FileName} ({info.Assemblies:N0} assemblies{(info.Transmittals.Count > 0 ? $", {string.Join(", ", info.Transmittals)}" : "")})");
+        tx.Commit();
+        return info;
+    }
+
+    public BomInfo? BomInfo(string job)
+    {
+        using var db = Open();
+        return Scalar(db, "SELECT bom FROM job_settings WHERE job = $job", ("$job", job)) is string json
+            ? JsonSerializer.Deserialize<BomInfo>(json, Json.Options) : null;
+    }
+
+    /// <summary>Every job with a BOM in its slot.</summary>
+    public List<(string Job, BomInfo Info)> BomJobs()
+    {
+        using var db = Open();
+        return Rows(db, "SELECT job, bom FROM job_settings WHERE bom IS NOT NULL", r => (r.GetString(0), JsonSerializer.Deserialize<BomInfo>(r.GetString(1), Json.Options)!))
+            .OrderBy(x => x.Item1, NumericOrder.Instance).ToList();
+    }
+
+    public List<BomRow> Bom(string job, string? mark = null)
+    {
+        using var db = Open();
+        return mark is null
+            ? Rows(db, "SELECT row FROM job_bom WHERE job = $job ORDER BY rowid", r => JsonSerializer.Deserialize<BomRow>(r.GetString(0), Json.Options)!, ("$job", job))
+            : Rows(db, "SELECT row FROM job_bom WHERE job = $job AND mark = $mark ORDER BY rowid", r => JsonSerializer.Deserialize<BomRow>(r.GetString(0), Json.Options)!, ("$job", job), ("$mark", mark));
+    }
+
+    public bool ClearBom(string job, Device by)
+    {
+        using var db = Open();
+        var info = BomInfo(job);
+        Exec(db, "DELETE FROM job_bom WHERE job = $job", ("$job", job));
+        Exec(db, "UPDATE job_settings SET bom = NULL WHERE job = $job", ("$job", job));
+        if (info is not null)
+            AddActivity(db, DateTime.UtcNow.ToString("o"), by, "bom", job, null, null, null, null, null, $"Removed the BOM of job {job} ({info.FileName})");
+        return info is not null;
+    }
+
+    /// <summary>A mark's piece codes, each with the load whose row has it (if any).</summary>
+    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark)
+    {
+        using var db = Open();
+        return Rows(db, """
+            SELECT p.id, p.code, p.mark, p.sequence, p.source, p.added_at, p.added_by, p.status,
+                   (SELECT l.load_id FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
+                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1)
+            FROM piece_codes p WHERE p.job = $job AND p.mark = $mark COLLATE NOCASE ORDER BY p.code
+            """, r => (ReadCode(r), N(r, 8), N(r, 9)), ("$job", job), ("$mark", mark));
     }
 
     /// <summary>Removes every code of a job (rows already loaded keep the code they were scanned with).</summary>

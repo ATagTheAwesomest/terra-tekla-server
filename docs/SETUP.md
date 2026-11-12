@@ -326,6 +326,7 @@ plus `X-Terra-Version`. Errors are JSON problem details with `detail` saying why
 | POST | `/api/loads/{loadId}/ops` | Apply one operation. Body: `{ "op", "opId", "job", "loadNumber", ...fields }`. Answers `{ state, changed }`. 400 with the reason if it can't be applied. |
 | POST | `/api/loads/{loadId}/ops/batch` | Apply up to 500 operations in order, in one write: `{ "job", "loadNumber", "ops": [...] }`. Answers `{ state, changed, results: [{ opId, changed, error }] }`; an operation the load refuses is skipped with its `error`, the rest still apply. The app sends what it has queued this way. |
 | | `/api/jobs/{job}/codes...` | Piece codes: see `PIECE-CODES.md`. |
+| | `/api/jobs/{job}/bom...` | The job's BOM (transmittals): see `JOB-BOM.md`. |
 | GET | `/api/activity?device=&job=&load=&mark=&before=&limit=` | History, newest first. `load` is the load id; `before` an activity id for paging; `limit` up to 500 (default 100). |
 | GET | `/api/docs/setup`, `/api/docs/photos` | This file and `PHOTOS.md`, as Markdown. |
 | | `/api/photos...` | See `PHOTOS.md`. |
@@ -406,6 +407,7 @@ the socket with code 4401. Then the server sends:
 | `device-merged` | `from`, `into`, `device` | Device `from` was merged into `into`; an app using `from` switches to `into`. |
 | `photos` | `job`, `load` | A load's photos changed. |
 | `codes`, `codes-settings`, `codes-cleared` | `job`, ... | A job's piece codes changed (see `PIECE-CODES.md`). |
+| `bom` | `job`, `uploadedAt` | A job's BOM was uploaded or removed (see `JOB-BOM.md`). |
 | `pong` | `at` | Answer to `{ "type": "ping" }`. |
 
 The app reconnects by itself (backing off up to 30 seconds) and, on reconnect, sends anything waiting
@@ -436,6 +438,7 @@ is running. Times are UTC ISO-8601 text.
 | `photos` | `id`, `job`, `load_number`, `file_name`, `mark`, `device_id`, `device_name`, `device_number`, `bytes`, `taken_at`, `deleted_at` | A record of each photo saved. `device_number` is the iPad's fixed "User N". |
 | `device_aliases` | `old_id`, `device_id`, `merged_at` | Device ids merged into another device (the same iPad). A request with an old id is that device. |
 | `piece_codes`, `job_settings` | | Piece codes per job and their settings: see `PIECE-CODES.md`. |
+| `job_bom` | | Each job's BOM, one row per assembly and transmittal: see `JOB-BOM.md`. |
 
 Handy queries (`sqlite3 terra.db`):
 

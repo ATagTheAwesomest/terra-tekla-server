@@ -286,7 +286,11 @@ api.MapGet("/jobs/powerfab", async (IHttpClientFactory factory, CancellationToke
         }
     }
     var rows = found.Select(j => (j.Number, j.Description, j.Location, InPowerFab: true))
-        .Concat(mine.Keys.Where(k => !found.Any(f => f.Number.Equals(k, StringComparison.OrdinalIgnoreCase))).Select(k => (Number: k, Description: "", Location: "", InPowerFab: false)))
+        // Jobs the server has something for (stacks, piece codes, a BOM) that PowerFab didn't list:
+        // a job set up ahead of PowerFab access, say.
+        .Concat(mine.Keys.Concat(store.CodeJobs().Select(c => c.Job)).Concat(store.BomJobs().Select(b => b.Job))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(k => !found.Any(f => f.Number.Equals(k, StringComparison.OrdinalIgnoreCase))).Select(k => (Number: k, Description: "", Location: "", InPowerFab: false)))
         .OrderByDescending(j => j.Number, NumericOrder.Instance)
         .Select(j =>
         {
@@ -406,6 +410,14 @@ api.MapPost("/loads/{loadId}/ops/batch", async (string loadId, JsonObject body, 
 
 // ---- Piece codes (docs/PIECE-CODES.md) --------------------------------------------------------
 
+object? BomMatch(string job, List<CodeLine> lines)
+{
+    var marks = store.Bom(job).Select(r => r.Mark).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (marks.Count == 0 || lines.Count == 0) return null;
+    var listMarks = lines.Select(l => l.Mark).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    return new { marks = listMarks.Count, inBom = listMarks.Count(marks.Contains) };
+}
+
 static object CodeView(PieceCode c) => new { id = c.Id, code = c.Code, mark = c.Mark, sequence = c.Sequence, source = c.Source, status = c.Status };
 
 // A job's piece code settings and its codes added after `since` (the app keeps a copy and asks for
@@ -453,6 +465,26 @@ api.MapPost("/jobs/{job}/codes", (string job, CodeLine body, HttpContext http) =
     var code = store.FindCode(job, body.Code);
     return Results.Json(new { added = result.Added, code = code is null ? null : CodeView(code) }, Json.Options);
 });
+
+// A mark's piece codes and which load has each (Piece lookup on the app).
+api.MapGet("/jobs/{job}/marks/{mark}/codes", (string job, string mark) =>
+    Results.Json(new
+    {
+        job,
+        mark,
+        codes = store.CodesOfMark(job, CodeList.CleanMark(mark)).Select(c => new { code = c.Code.Code, sequence = c.Code.Sequence, source = c.Code.Source, loadId = c.LoadId, loadNumber = c.LoadNumber }),
+    }, Json.Options));
+
+// ---- Job BOM (docs/JOB-BOM.md) -----------------------------------------------------------------
+
+api.MapGet("/jobs/{job}/bom/info", (string job) =>
+    store.BomInfo(job) is { } info ? Results.Json(new { job, info }, Json.Options) : Results.Problem($"Job {job} has no BOM.", statusCode: 404));
+
+// The job's BOM: what it is, and one row per assembly and transmittal. 404 when the slot is empty.
+api.MapGet("/jobs/{job}/bom", (string job, string? mark) =>
+    store.BomInfo(job) is { } info
+        ? Results.Json(new { job, info, rows = store.Bom(job, mark is null ? null : CodeList.CleanMark(mark)) }, Json.Options)
+        : Results.Problem($"Job {job} has no BOM.", statusCode: 404));
 
 api.MapGet("/activity", (string? device, string? job, string? load, string? mark, long? before, int? limit) =>
     store.History(device, job, load, mark, before, limit ?? 100));
@@ -613,6 +645,9 @@ admin.MapPost("/jobs/{job}/codes/import", (string job, CodeImport body, HttpCont
         errorCount = errors.Count,
         statuses = lines.Where(l => l.Status is not null).GroupBy(l => l.Status!).ToDictionary(g => g.Key, g => g.Count()),
         suggestedPattern = CodeList.SuggestPattern(lines),
+        // With a BOM in the job's slot: how many of the list's marks it has (few means the list may
+        // be another job's).
+        bom = BomMatch(job, lines),
     }, Json.Options);
 });
 
@@ -621,6 +656,47 @@ admin.MapDelete("/jobs/{job}/codes", (string job, HttpContext http) =>
     var n = store.ClearCodes(job, Me(http) ?? AdminDevice);
     hub.Broadcast(new { type = "codes-cleared", job });
     return Results.Json(new { removed = n });
+});
+
+admin.MapGet("/boms", () => store.BomJobs().Select(j => new { job = j.Job, info = j.Info }));
+
+// Puts a BOM in the job's slot: the file itself as the body (an .xlsx or a CSV), its name in
+// X-File-Name. Replaces the BOM there.
+admin.MapPost("/jobs/{job}/bom", async (string job, HttpContext http) =>
+{
+    const int max = 50 * 1024 * 1024;
+    if (http.Request.ContentLength > max)
+        return Results.Problem("The BOM file is over 50 MB.", statusCode: 413);
+    using var buffer = new MemoryStream();
+    await http.Request.Body.CopyToAsync(buffer, http.RequestAborted);
+    if (buffer.Length == 0)
+        return Results.Problem("No file came with the request.", statusCode: 400);
+    if (buffer.Length > max)
+        return Results.Problem("The BOM file is over 50 MB.", statusCode: 413);
+    var name = Uri.UnescapeDataString(http.Request.Headers["X-File-Name"].FirstOrDefault() ?? "bom.xlsx");
+    try
+    {
+        var (rows, info) = BomReader.Read(buffer.ToArray(), name);
+        info = store.SaveBom(job, rows, info, Me(http) ?? AdminDevice);
+        hub.Broadcast(new { type = "bom", job, uploadedAt = info.UploadedAt });
+        return Results.Json(new
+        {
+            info,
+            // The BOM's own job number ("Our job #" on its Settings sheet), when it isn't this job.
+            otherJob = info.BomJob is { } j && !j.Equals(job, StringComparison.OrdinalIgnoreCase) ? j : null,
+        }, Json.Options);
+    }
+    catch (BomException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+admin.MapDelete("/jobs/{job}/bom", (string job, HttpContext http) =>
+{
+    var removed = store.ClearBom(job, Me(http) ?? AdminDevice);
+    hub.Broadcast(new { type = "bom", job, uploadedAt = (string?)null });
+    return Results.Json(new { removed });
 });
 
 admin.MapGet("/photo-rules", () => RulesView());
@@ -1203,6 +1279,7 @@ static string? Doc(string name)
         "setup" => "docs.SETUP.md",
         "photos" => "docs.PHOTOS.md",
         "codes" => "docs.PIECE-CODES.md",
+        "bom" => "docs.JOB-BOM.md",
         _ => null,
     };
     if (resource is null)

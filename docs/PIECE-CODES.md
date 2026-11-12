@@ -40,12 +40,12 @@ Importing the same export again later refreshes it: each piece's status and sequ
 codes already there are left as they are, and new ones are added (tick "Move a code..." to also move
 codes the export now gives another mark). Nothing is removed by a re-import.
 
-After an import the board shows how many pieces have each status, and, when every code has the
+After an import the board shows how many pieces have each status (in the file), and, when every code has the
 same shape, a pattern for them (for example `^C\d{7}Q\d$` for `C9227621Q1`) with a button to use it.
 
 The facility export's **Assembly** is the PowerFab main mark (for example `10121601`), so no mapping
-is needed. A piece's **Status** from the list (for example "Shipped to treatment") is shown on the
-handheld when its code is scanned, in orange when it says shipped. It never blocks a scan.
+is needed. A piece's **Status** from the list (for example "Shipped to treatment") is kept, but not shown on
+the iPads or handhelds for now: an export isn't live, so it would go stale. It never changes scanning.
 
 ## On the iPads and handhelds
 
