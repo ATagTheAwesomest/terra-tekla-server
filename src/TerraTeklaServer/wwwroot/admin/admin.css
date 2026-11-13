@@ -284,3 +284,26 @@ p.path { word-break: break-all; }
 .bom-info dd { margin: 0; }
 .open-job { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
 .open-job input { width: 12em; }
+
+/* Nothing pushes the page out to the right: grid columns and panels may shrink, long words (codes,
+   file names, paths) break, and a wide table scrolls sideways inside its own box instead. */
+html, body { overflow-x: clip; }
+main, .grid > *, .panel, .stack { min-width: 0; }
+.panel, .feed .what, .doc, .health, .bom-info { overflow-wrap: anywhere; }
+.panel table, .doc table { display: block; max-width: 100%; overflow-x: auto; }
+.panel td, .panel th { overflow-wrap: normal; }
+.panel td.mark, .panel td.num, .panel th { white-space: nowrap; }
+.panel table > tbody, .panel table > thead { width: 100%; }
+.stack table { display: table; }
+.doc code { overflow-wrap: anywhere; }
+.log { overscroll-behavior: contain; }
+
+/* Small screens: the header scrolls away with the page (it is tall once the menu wraps), and the
+   menu is one row you swipe sideways. */
+@media (max-width: 700px), (max-height: 560px) {
+  .top { position: static; gap: .5rem 1rem; padding: .5rem .75rem; }
+  .top nav { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; order: 3; flex-basis: 100%; scrollbar-width: none; }
+  .top nav a { white-space: nowrap; padding: .4rem .6rem; }
+  main { padding: .75rem; }
+  .panel { padding: .8rem; }
+}

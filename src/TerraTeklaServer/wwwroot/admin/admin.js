@@ -1450,9 +1450,17 @@ async function draw() {
       : page === 'docs' ? pageDocs(arg || 'setup')
       : pageHome());
     if (seq !== drawing) return;
+    const nav = redrawReason === 'nav';
     const scroll = window.scrollY;
+    const inner = nav ? [] : innerScrolls();
     $('#main').innerHTML = html;
-    window.scrollTo(0, scroll);
+    // A new page starts at its top. A live redraw keeps where you were, in the page and in any box
+    // that scrolls by itself (activity log, wide tables), and only moves the page if it moved.
+    if (nav) window.scrollTo(0, 0);
+    else {
+      if (window.scrollY !== scroll) window.scrollTo(0, scroll);
+      restoreScrolls(inner);
+    }
     fillPhotos();
     if (page === 'jobs') filterJobs();
     if (page === 'photos') filterPhotoJobs();
@@ -1476,7 +1484,33 @@ function redrawSoon() {
   if (currentPage === 'settings' || $('#dlg-pin').open) return;
   if (document.querySelector('input:focus') || $('#dlg-photo').open) return;
   clearTimeout(redrawTimer);
-  redrawTimer = setTimeout(() => { redrawReason = 'live'; draw(); }, 250);
+  redrawTimer = setTimeout(() => {
+    // Not while a finger or wheel is scrolling: redrawing then stops the scroll dead or jumps it.
+    if (touching || Date.now() - lastScrollAt < 800) { redrawSoon(); return; }
+    redrawReason = 'live';
+    draw();
+  }, 250);
+}
+
+let lastScrollAt = 0;
+let touching = false;
+function watchScrolling() {
+  const mark = () => { lastScrollAt = Date.now(); };
+  window.addEventListener('scroll', mark, { passive: true, capture: true });
+  window.addEventListener('wheel', mark, { passive: true });
+  window.addEventListener('touchstart', () => { touching = true; mark(); }, { passive: true });
+  window.addEventListener('touchend', () => { touching = false; mark(); }, { passive: true });
+  window.addEventListener('touchcancel', () => { touching = false; }, { passive: true });
+}
+
+const SCROLLERS = '#main .log, #main .stack, #main .panel table, #main .doc table';
+function innerScrolls() {
+  return [...document.querySelectorAll(SCROLLERS)].map((el) => [el.scrollLeft, el.scrollTop]);
+}
+function restoreScrolls(saved) {
+  document.querySelectorAll(SCROLLERS).forEach((el, i) => {
+    if (saved[i] && (saved[i][0] || saved[i][1])) { el.scrollLeft = saved[i][0]; el.scrollTop = saved[i][1]; }
+  });
 }
 
 // ---- Live connection --------------------------------------------------------------------
@@ -1526,7 +1560,12 @@ async function saveDevice(form, changes) {
 }
 
 function bind() {
-  window.addEventListener('hashchange', () => { redrawReason = 'nav'; draw(); });
+  watchScrolling();
+  window.addEventListener('hashchange', () => {
+    redrawReason = 'nav';
+    draw();
+    document.querySelector('.top nav a.active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  });
   $('#form-key').addEventListener('submit', () => {
     try { localStorage.setItem(KEY, $('#input-key').value.trim()); } catch { /* private window */ }
     socket?.close();
@@ -1754,7 +1793,7 @@ function bind() {
 
   // The Server page keeps itself up to date.
   setInterval(() => {
-    if (currentPage === 'server' && adminToken() && !document.hidden && !$('#dlg-pin').open) { redrawReason = 'live'; draw(); }
+    if (currentPage === 'server' && adminToken() && !document.hidden && !$('#dlg-pin').open && !touching && Date.now() - lastScrollAt > 800) { redrawReason = 'live'; draw(); }
   }, 10000);
   $('#dlg-photo').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 }
