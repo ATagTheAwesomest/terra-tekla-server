@@ -55,6 +55,10 @@ the iPads or handhelds for now: an export isn't live, so it would go stale. It n
   Scanning a plain mark on a code job still works; the row just has no code.
 - **New code** (pairing on): the app asks for the piece's mark; scan the mark tag (or type it) and the
   piece loads. Cancel, or scan something else, to drop it.
+- **Custom barcodes** (pairing on): stickers of your own, any text (`T-42`). Tap **+ Code** in
+  Shipping, scan the sticker, then the piece's mark: one piece of that mark loads in PowerFab and the
+  sticker is paired with it on the server. After that the sticker scans like any listed code (no
+  + Code needed), and it truck checks that one piece. The code pattern doesn't apply to + Code.
 - **Truck check**: a code ticks off the row that was loaded with that code. A code whose row was
   loaded by mark ticks off a row of its mark that has no code. The same code twice is refused. Each
   mark shows how many of its pieces are checked (`1001-C1 12/40`).
