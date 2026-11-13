@@ -4,7 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.11.1</Version>
+    <Version>0.12.0</Version>
   </PropertyGroup>
 
   <!-- The setup guide and photo guide: served by the admin page (/admin, Docs) and copied next to the exe. -->
@@ -13,10 +13,12 @@
     <EmbeddedResource Include="..\..\docs\PHOTOS.md" LogicalName="docs.PHOTOS.md" />
     <EmbeddedResource Include="..\..\docs\PIECE-CODES.md" LogicalName="docs.PIECE-CODES.md" />
     <EmbeddedResource Include="..\..\docs\JOB-BOM.md" LogicalName="docs.JOB-BOM.md" />
+    <EmbeddedResource Include="..\..\docs\SPEED.md" LogicalName="docs.SPEED.md" />
     <None Include="..\..\docs\SETUP.md" Link="SETUP.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\PHOTOS.md" Link="PHOTOS.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\PIECE-CODES.md" Link="PIECE-CODES.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\JOB-BOM.md" Link="JOB-BOM.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\docs\SPEED.md" Link="SPEED.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\photo-rules.example.json" Link="photo-rules.example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\update-client.ps1" Link="update-client.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\windows\local.settings.example.json" Link="local.settings.example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

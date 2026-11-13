@@ -26,6 +26,8 @@ var settingsPath = builder.Configuration["SETTINGS_FILE"] is { Length: > 0 } cus
 builder.Configuration.AddJsonFile(settingsPath, optional: true, reloadOnChange: false);
 var settings = Settings.From(builder.Configuration);
 var serverStats = new ServerStats();
+var powerFabCalls = new PowerFabCalls();
+var scanTimes = new ScanTimes();
 builder.Logging.AddProvider(new StatsLoggerProvider(serverStats));
 
 builder.Services.AddSingleton(settings);
@@ -251,10 +253,10 @@ api.MapPost("/powerfab/{command}", async (string command, HttpContext http, IHtt
         return Results.Problem("This server has no CONVERSION_URL, so PowerFab can't be reached.", statusCode: 502);
     if (!System.Text.RegularExpressions.Regex.IsMatch(command, "^[A-Za-z0-9_]{1,80}$"))
         return Results.Problem("That isn't a PowerFab command name.", statusCode: 400);
-    Me(http);
+    var me = Me(http);
     using var body = new StreamReader(http.Request.Body);
     var json = await body.ReadToEndAsync(http.RequestAborted);
-    var reply = await PowerFabAsync(factory, command, json, http.RequestAborted);
+    var reply = await PowerFabAsync(factory, command, json, http.RequestAborted, me?.Name);
     return reply.Error is { } error
         ? Results.Problem(error, statusCode: 502)
         : Results.Content(reply.Body, reply.ContentType ?? "application/json", Encoding.UTF8, reply.Status);
@@ -406,6 +408,14 @@ api.MapPost("/loads/{loadId}/ops/batch", async (string loadId, JsonObject body, 
     {
         return Results.Problem(ex.Message, statusCode: 400);
     }
+});
+
+// How long the last scans took on a device (the app's js/scan-timing.js), for the admin board's
+// Server page (docs/SPEED.md). Body: {"scans": [{id, mark, at, ahead, waitMs, totalMs, ok, error, steps}]}.
+api.MapPost("/diag/scans", (ScanTimes.Batch body, HttpContext http) =>
+{
+    var me = Me(http, required: true)!;
+    return Results.Json(new { kept = scanTimes.Add(me, body.Scans ?? []) });
 });
 
 // ---- Piece codes (docs/PIECE-CODES.md) --------------------------------------------------------
@@ -768,6 +778,8 @@ admin.MapGet("/stats", async (IHttpClientFactory factory) =>
             .Select(d => new { name = d.Item1, disk = ServerStats.Disk(d.Item2) })
             .Where(d => d.disk is not null),
         conversion = await ConversionHealth(factory, settings.ConversionUrl),
+        powerFab = powerFabCalls.Snapshot(),
+        scans = scanTimes.Snapshot(),
         client = new { root = settings.ClientRoot, served = File.Exists(Path.Combine(settings.ClientRoot, "index.html")), version = ClientVersion() },
         photos = new { enabled = settings.Photos.Enabled, root = settings.Photos.Root, rulesPath = settings.Photos.RulesPath, rules = ruleCount, rulesError },
         accessKeySet = settings.AccessKey != "",
@@ -1145,7 +1157,11 @@ async Task<object> ConversionHealth(IHttpClientFactory factory, string url)
 
 // One PowerFab command through tekla-conversion-layer, with this server's CONVERSION_KEY. Error is set
 // when the bridge couldn't be reached or refused the key (both 502 for the caller).
-async Task<(int Status, string Body, string? ContentType, string? Error)> PowerFabAsync(IHttpClientFactory factory, string command, string json, CancellationToken ct)
+// Reads asked for at once share one call, and a read is reused for a moment (PowerFabCalls.cs).
+async Task<PowerFabReply> PowerFabAsync(IHttpClientFactory factory, string command, string json, CancellationToken ct, string? device = null) =>
+    await powerFabCalls.RunAsync(command, json == "" ? "{}" : json, device, token => SendPowerFabAsync(factory, command, json, token), ct);
+
+async Task<PowerFabReply> SendPowerFabAsync(IHttpClientFactory factory, string command, string json, CancellationToken ct)
 {
     using var request = new HttpRequestMessage(HttpMethod.Post, $"{settings.ConversionUrl}/api/powerfab/{command}")
     {
@@ -1158,12 +1174,12 @@ async Task<(int Status, string Body, string? ContentType, string? Error)> PowerF
         var text = await reply.Content.ReadAsStringAsync(ct);
         // The conversion layer's own 401 means CONVERSION_KEY is wrong: not the iPad's fault.
         if (reply.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-            return (502, "", null, "The PowerFab bridge refused this server's key (CONVERSION_KEY).");
-        return ((int)reply.StatusCode, text, reply.Content.Headers.ContentType?.ToString(), null);
+            return new(502, "", null, "The PowerFab bridge refused this server's key (CONVERSION_KEY).");
+        return new((int)reply.StatusCode, text, reply.Content.Headers.ContentType?.ToString(), null);
     }
     catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
     {
-        return (502, "", null, $"Can’t reach the PowerFab bridge (tekla-conversion-layer): {ex.Message}");
+        return new(502, "", null, $"Can’t reach the PowerFab bridge (tekla-conversion-layer): {ex.Message}");
     }
 }
 
@@ -1280,6 +1296,7 @@ static string? Doc(string name)
         "photos" => "docs.PHOTOS.md",
         "codes" => "docs.PIECE-CODES.md",
         "bom" => "docs.JOB-BOM.md",
+        "speed" => "docs.SPEED.md",
         _ => null,
     };
     if (resource is null)

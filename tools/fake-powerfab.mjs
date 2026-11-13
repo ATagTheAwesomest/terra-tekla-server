@@ -8,6 +8,13 @@
 //
 // Then point the server at it: CONVERSION_URL=http://127.0.0.1:8099 CONVERSION_KEY=fake-key.
 // Data lives in memory only and starts fresh each run. Never point a real server at this.
+//
+// A job the size of a real one, answered the way the real bridge does (one PowerFab command at a
+// time, slower for bigger replies), for timing scans (docs/SPEED.md):
+//   FAKE_ASSEMBLIES=1000  more made-up assemblies (marks 5000-A1, 5001-A1, ...), 2 pieces each
+//   FAKE_LOADS=60         that many loads already shipped, 20 pieces each
+//   FAKE_SERIAL=1         one command at a time, as the real conversion layer does
+//   FAKE_DELAY_MS=120     time per command; FAKE_BYTES_PER_MS=400 adds 1 ms per 400 bytes of reply
 
 import http from 'node:http';
 
@@ -23,9 +30,24 @@ const ITEMS = [
   [8004, '2001-C1', 2, '2', 1, 610.0, 'HSS', '6 x 6 x 1/2', 'A500-B', 5000],
   [8005, '1003-W2', 3, '3', 2, 35.0, 'L', '3 x 3 x 1/4', 'A36', 1200],
 ].map(([itemId, mark, sequenceId, sequence, total, kg, shape, dimensions, grade, length]) => ({ itemId, mark, sequenceId, sequence, total, kg, shape, dimensions, grade, length }));
+for (let i = 0; i < Number(process.env.FAKE_ASSEMBLIES ?? 0); i++) {
+  ITEMS.push({ itemId: 20000 + i, mark: `${5000 + i}-A1`, sequenceId: 10 + (i % 20), sequence: String(10 + (i % 20)), total: 2, kg: 100 + (i % 50), shape: 'W', dimensions: '10 x 33', grade: 'A992', length: 3000 + i });
+}
 
 let nextId = 1000;
 const loads = [];  // { id, number, shipped, shipDate, capacity, material: [{ truckId, item, qty, loaded: [{id, qty}], returned: [{id, qty}] }] }
+
+// Loads shipped before (FAKE_LOADS): the job's history, which every read of the loads carries.
+for (let n = 0; n < Number(process.env.FAKE_LOADS ?? 0); n++) {
+  const material = [];
+  for (let k = 0; k < 20; k++) {
+    const item = ITEMS[5 + ((n * 20 + k) % Math.max(1, ITEMS.length - 5))] ?? ITEMS[0];
+    if (material.some((m) => m.item === item) || item.total < 2) continue;
+    item.total += 1; // shipped pieces on top of what is left
+    material.push({ truckId: nextId++, item, qty: 1, loaded: [{ id: nextId++, qty: 1 }], returned: [] });
+  }
+  loads.push({ id: nextId++, number: `S${n + 1}`, shipped: true, shipDate: '2026-10-01', capacity: 20000, material });
+}
 
 const sum = (list) => list.reduce((n, e) => n + e.qty, 0);
 const assigned = (item) => loads.flatMap((l) => l.material).filter((m) => m.item === item).reduce((n, m) => n + m.qty, 0);
@@ -76,6 +98,22 @@ function materialJson(m) {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+function loadJson(l) {
+  return {
+    ProductionControlLoadID: String(l.id),
+    ProductionControlID: String(JOB.pcid),
+    LoadNumber: l.number,
+    Capacity: String(l.capacity),
+    ShippingDestinationGroupID: '',
+    Shipped: l.shipped ? '1' : '0',
+    ShippedDate: l.shipDate ?? '',
+    ...(l.material.length ? { Material: l.material.length === 1 ? materialJson(l.material[0]) : l.material.map(materialJson) } : {}),
+  };
+}
+
+// Material_Add and _Load answer the load they changed, with its material, as the real bridge does.
+const loadReply = (load) => ({ Successful: '1', ResultData: { ProductionControlLoad: loadJson(load) } });
+
 const commands = {
   ProductionControlJob_Get: () => ({ ProductionControlJob: [{ JobNumber: JOB.number, JobDescription: JOB.description, JobLocation: 'Yard' }] }),
   GetProductionControlJobs: () => commands.ProductionControlJob_Get(),
@@ -94,16 +132,7 @@ const commands = {
   ProductionControlLoad_Get: () => ({
     Successful: '1',
     ResultData: {
-      ProductionControlLoad: loads.map((l) => ({
-        ProductionControlLoadID: String(l.id),
-        ProductionControlID: String(JOB.pcid),
-        LoadNumber: l.number,
-        Capacity: String(l.capacity),
-        ShippingDestinationGroupID: '',
-        Shipped: l.shipped ? '1' : '0',
-        ShippedDate: l.shipDate ?? '',
-        ...(l.material.length ? { Material: l.material.length === 1 ? materialJson(l.material[0]) : l.material.map(materialJson) } : {}),
-      })),
+      ProductionControlLoad: loads.map(loadJson),
     },
   }),
   ProductionControlLoadRemaining_Get: () => ({
@@ -153,7 +182,7 @@ const commands = {
       if (existing) existing.qty += qty;
       else load.material.push({ truckId: nextId++, item, qty, loaded: [], returned: [] });
     }
-    return { Successful: '1' };
+    return loadReply(load);
   },
   ProductionControlLoadMaterial_Remove: (f) => {
     const load = loadById(f.ProductionControlLoadID);
@@ -176,7 +205,7 @@ const commands = {
       if (sum(m.loaded) + qty > m.qty) throw new Refused(`Quantity to load for ${m.item.mark} is more than is assigned to the load.`);
       m.loaded.push({ id: nextId++, qty });
     }
-    return { Successful: '1' };
+    return loadReply(load);
   },
   ProductionControlLoadMaterial_Unload: (f) => {
     const load = loadById(f.ProductionControlLoadID);
@@ -210,6 +239,7 @@ function send(res, status, body) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/stats') return send(res, 200, calls);
   if (req.method === 'GET' && req.url === '/health') return send(res, 200, { status: 'ok', mode: 'fake', writesEnabled: true });
   if (req.headers.authorization !== `Bearer ${key}`) return send(res, 401, { title: 'Unauthorized' });
   const m = /^\/api\/powerfab\/([A-Za-z0-9_]+)$/.exec(req.url ?? '');
@@ -217,17 +247,32 @@ const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
-    const fn = commands[m[1]];
-    if (!fn) return send(res, 422, { title: 'PowerFab refused the command', detail: `The fake PowerFab doesn't do ${m[1]}.` });
+    // The real bridge runs one PowerFab command at a time (FAKE_SERIAL=1).
+    if (process.env.FAKE_SERIAL === '1') {
+      line = line.then(() => new Promise((done) => { answer(m[1], body, res, done); }));
+    } else answer(m[1], body, res, () => {});
+  });
+});
+
+let line = Promise.resolve();
+const perByte = Number(process.env.FAKE_BYTES_PER_MS ?? 0);
+const calls = {}; // command -> how many times it was called (GET /stats)
+function answer(command, body, res, done) {
+  calls[command] = (calls[command] ?? 0) + 1;
+  {
+    const fn = commands[command];
+    if (!fn) { send(res, 422, { title: 'PowerFab refused the command', detail: `The fake PowerFab doesn't do ${command}.` }); return done(); }
     try {
       const reply = fn(body ? JSON.parse(body) : {});
-      // A little delay, like the real thing, so "sending" rows can be seen.
-      setTimeout(() => send(res, 200, reply), Number(process.env.FAKE_DELAY_MS ?? 120));
+      // A little delay, like the real thing, so "sending" rows can be seen; more for a big reply.
+      const bytes = perByte ? JSON.stringify(reply).length : 0;
+      setTimeout(() => { send(res, 200, reply); done(); }, Number(process.env.FAKE_DELAY_MS ?? 120) + (perByte ? bytes / perByte : 0));
     } catch (err) {
       if (err instanceof Refused) send(res, 422, { title: 'PowerFab refused the command', detail: err.message });
       else send(res, 500, { title: 'Fake PowerFab error', detail: err.message });
+      done();
     }
-  });
-});
+  }
+}
 
 server.listen(port, '127.0.0.1', () => console.log(`Fake PowerFab bridge on http://127.0.0.1:${port} (key "${key}"), job ${JOB.number}`));
