@@ -28,12 +28,35 @@ public sealed class LoadState
     [JsonIgnore]
     public List<Removal> Removed { get; set; } = [];
 
-    public LoadState Clone()
+    /// <summary>
+    /// A copy to change, so a refused operation leaves this one as it was. Field by field (a load can
+    /// have thousands of rows, and this runs on every change); a row's PowerFab details are shared,
+    /// since an operation only ever replaces them.
+    /// </summary>
+    public LoadState Clone() => new()
     {
-        var copy = JsonSerializer.Deserialize<LoadState>(JsonSerializer.Serialize(this, Json.Options), Json.Options)!;
-        copy.Removed = [.. Removed];
-        return copy;
-    }
+        LoadId = LoadId,
+        Job = Job,
+        LoadNumber = LoadNumber,
+        Rev = Rev,
+        UpdatedAt = UpdatedAt,
+        Stacks = Stacks.ConvertAll(st => new Stack
+        {
+            Id = st.Id,
+            Name = st.Name,
+            CreatedBy = st.CreatedBy,
+            Pallet = st.Pallet is { } p ? new Pallet { Mark = p.Mark, Photos = p.Photos, Manual = p.Manual } : null,
+            Items = st.Items.ConvertAll(e => e.Copy()),
+        }),
+        TruckCheck = TruckCheck is { } c ? new TruckCheck
+        {
+            StartedAt = c.StartedAt,
+            UpdatedAt = c.UpdatedAt,
+            Scans = c.Scans.ConvertAll(x => new CheckScan { Id = x.Id, Mark = x.Mark, Manual = x.Manual, ScannedAt = x.ScannedAt, ScannedBy = x.ScannedBy, Qty = x.Qty, Code = x.Code }),
+        } : null,
+        RecentOps = [.. RecentOps],
+        Removed = [.. Removed],
+    };
 }
 
 public sealed class Stack
@@ -70,6 +93,12 @@ public sealed class Entry
     public string Mark { get; set; } = "";
     public string Sequence { get; set; } = "";
     public bool Manual { get; set; }
+    /// <summary>
+    /// The piece's own code (jobs with piece codes: every piece of a mark has a different one), when it
+    /// was loaded by scanning that code. Null for a piece loaded by its mark. See docs/PIECE-CODES.md.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Code { get; set; }
     /// <summary>When it was scanned; null for a piece loaded in PowerFab itself.</summary>
     public string? ScannedAt { get; set; }
     /// <summary>Device id of whoever scanned it; null for a piece loaded in PowerFab itself.</summary>
@@ -83,6 +112,8 @@ public sealed class Entry
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Details { get; set; }
+
+    public Entry Copy() => (Entry)MemberwiseClone();
 }
 
 public sealed class TruckCheck
@@ -101,6 +132,9 @@ public sealed class CheckScan
     public string? ScannedBy { get; set; }
     /// <summary>How many pieces of the mark the scan checks off: 1, or a whole pallet's count.</summary>
     public int Qty { get; set; } = 1;
+    /// <summary>The piece code scanned (jobs with piece codes), which checks off that exact piece.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Code { get; set; }
 }
 
 public sealed record Removal(string Mark, string Sequence, long Rev, DateTime At);

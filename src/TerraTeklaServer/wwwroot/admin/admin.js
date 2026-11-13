@@ -183,24 +183,33 @@ function cleanMark(m) {
   return String(m ?? '').trim().toUpperCase().replace(/-+$/, '');
 }
 
+// A scan of a piece code (scan.code) checks off the row loaded with that code; failing that, a row
+// of its mark loaded without a code. A scan of a mark takes rows without a code first.
 function checkStatus(state) {
-  const queues = new Map();
+  const rows = [];
+  const byCode = new Map();
   let total = 0;
   for (const st of state.stacks) for (const e of st.items) {
     total++;
-    const k = cleanMark(e.mark);
-    if (!queues.has(k)) queues.set(k, []);
-    queues.get(k).push(e.id);
+    const row = { e, scan: null };
+    rows.push(row);
+    if (e.code) byCode.set(String(e.code).toUpperCase(), row);
   }
   const checked = new Map();
   let extras = 0;
+  const later = [];
   for (const scan of state.truckCheck?.scans ?? []) {
-    // A pallet is checked with one scan for all its pieces (scan.qty).
+    const row = scan.code ? byCode.get(String(scan.code).toUpperCase()) : null;
+    if (row && !row.scan) { row.scan = scan; checked.set(row.e.id, scan); } else if (row) extras++; else later.push(scan);
+  }
+  for (const scan of later) {
+    const k = cleanMark(scan.mark);
+    const free = rows.filter((r) => !r.scan && cleanMark(r.e.mark) === k).sort((a, b) => Boolean(a.e.code) - Boolean(b.e.code));
     let short = false;
+    // A pallet is checked with one scan for all its pieces (scan.qty).
     for (let i = 0; i < Math.max(1, Number(scan.qty) || 1); i++) {
-      const id = queues.get(cleanMark(scan.mark))?.shift();
-      if (id) checked.set(id, scan);
-      else short = true;
+      const r = free[i];
+      if (r && !(scan.code && r.e.code)) { r.scan = scan; checked.set(r.e.id, scan); } else short = true;
     }
     if (short) extras++;
   }
@@ -435,9 +444,11 @@ async function pageJobs() {
     ${r.ok ? `<p class="muted">Every job PowerFab gives this server's PowerFab user, open or closed: the same list the iPads pick from. Read ${esc(when(r.fetchedAt))}.</p>`
       : `<div class="banner bad"><span>Couldn’t read PowerFab’s job list: ${esc(r.error)}</span><a class="btn" href="#/settings">Settings</a></div>`}
     <input class="filter" type="search" id="job-filter" placeholder="Filter jobs" value="${esc(jobFilter)}" autocomplete="off">
+    <form class="open-job" id="form-open-job"><span class="muted">A job PowerFab doesn’t list yet (to put in its piece codes or BOM ahead of time):</span>
+      <input type="text" id="open-job" placeholder="Job number" autocomplete="off" spellcheck="false"> <button class="btn" type="submit">Open</button></form>
     ${r.jobs.length ? `<div style="overflow-x:auto"><table id="jobs-table"><thead><tr><th>Job</th><th>Description</th><th>Location</th><th class="num">Loads here</th><th class="num">Pieces in stacks</th><th>Last activity</th>${r.photosEnabled ? '<th>Photos go to</th>' : ''}</tr></thead><tbody>
     ${r.jobs.map((j) => `<tr class="${j.inPowerFab ? '' : 'not-pf'}" data-search="${esc(`${j.job} ${j.description} ${j.location}`.toLowerCase())}">
-      <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks for it but PowerFab didn’t list it">not in PowerFab</span>'}</td>
+      <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks, piece codes or a BOM for it, but PowerFab didn’t list it">not in PowerFab</span>'}</td>
       <td>${esc(j.description)}</td><td>${esc(j.location)}</td>
       <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
       ${r.photosEnabled ? `<td class="path">${j.photoError ? `<span class="error">${esc(j.photoError)}</span>` : `${esc(j.photoFolder ?? '')}<br><span class="muted">${j.photoRule === 'default' ? 'default' : `rule ${esc(j.photoRule ?? '')}`}</span>`}</td>` : ''}
@@ -465,7 +476,158 @@ async function pageJob(job) {
       }).join('')}</tbody></table>` : '<p class="muted">No loads yet.</p>'}
     </section>
     <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
-  </div>`;
+  </div>
+  ${await bomPanel(job)}
+  ${await codesPanel(job)}`;
+}
+
+// The job's BOM slot (docs/JOB-BOM.md): the workbook the BOM script makes, for transmittals and
+// other details PowerFab doesn't have. Information only.
+async function bomPanel(job) {
+  let info = null;
+  try { info = (await api(`/jobs/${enc(job)}/bom/info`)).info; } catch { /* 404: empty slot */ }
+  const open = Boolean(adminToken());
+  const off = open ? '' : ' disabled';
+  return `<section class="panel" id="bom-panel" data-bom-job="${esc(job)}">
+    <h2>BOM <span class="muted">· ${info ? `${num(info.assemblies)} assemblies` : 'none yet'}</span></h2>
+    <p class="muted">The BOM workbook for this job (the “Master BOM” sheet is read). It tells the iPads which transmittal each assembly is in, with its due date, paint / notes and revision. Information only: it never changes scanning or shipping. Upload again when there’s a newer one.${open ? '' : ' Changing it needs the admin code.'}</p>
+    ${info ? `<dl class="bom-info">
+      <dt>File</dt><dd>${esc(info.fileName)}</dd>
+      <dt>Uploaded</dt><dd>${esc(when(info.uploadedAt))}${info.uploadedBy ? ` by ${esc(info.uploadedBy)}` : ''}</dd>
+      <dt>Transmittals</dt><dd>${info.transmittals.length ? info.transmittals.map(esc).join(', ') : '<span class="muted">none in the file</span>'}</dd>
+      ${info.bomJob ? `<dt>BOM’s job #</dt><dd>${esc(info.bomJob)}${info.bomJob.toUpperCase() !== job.toUpperCase() ? ' <span class="pill warn">not this job</span>' : ''}</dd>` : ''}
+    </dl>` : ''}
+    ${open ? '' : '<p><button class="btn" type="button" data-unlock>Enter code to change</button></p>'}
+    <form id="form-bom" class="codes-form"><p><input type="file" id="bom-file" accept=".xlsx,.csv,.txt,.tsv"${off}>
+      <button class="btn primary" type="submit"${off}>Upload</button>
+      ${info ? `<button class="btn" type="button" data-bom-clear${off}>Remove</button>` : ''}</p></form>
+    <div id="bom-out"></div>
+  </section>`;
+}
+
+async function uploadBom() {
+  const job = $('#bom-panel').dataset.bomJob;
+  const file = $('#bom-file').files?.[0];
+  const out = $('#bom-out');
+  if (!file) { out.innerHTML = '<p class="error">Pick the BOM file first.</p>'; return; }
+  out.textContent = 'Reading…';
+  try {
+    const res = await fetch(`/api/admin/jobs/${enc(job)}/bom`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key()}`, 'X-Terra-Admin': adminToken(), 'X-File-Name': encodeURIComponent(file.name), 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    const r = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(r.detail || r.title || `Server error ${res.status}`);
+    await draw();
+    $('#bom-out').innerHTML = `<p class="ok-text">Read ${num(r.info.assemblies)} assemblies from ${num(r.info.lines)} lines${r.info.sheet ? ` (sheet “${esc(r.info.sheet)}”)` : ''}.</p>`
+      + (r.otherJob ? `<p class="error">The BOM says it is for job ${esc(r.otherJob)}, not ${esc(job)}. Check it’s in the right job.</p>` : '');
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+let bomClearArmedAt = 0;
+async function clearBom(btn) {
+  const job = $('#bom-panel').dataset.bomJob;
+  if (Date.now() - bomClearArmedAt > 5000) {
+    bomClearArmedAt = Date.now();
+    btn.textContent = 'Tap again to remove it';
+    return;
+  }
+  bomClearArmedAt = 0;
+  try {
+    await api(`/admin/jobs/${enc(job)}/bom`, { method: 'DELETE' });
+    await draw();
+  } catch (err) {
+    $('#bom-out').innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+// Piece codes (docs/PIECE-CODES.md): on some jobs every piece has its own code. Seen by anyone with
+// the key; changed with the admin code.
+async function codesPanel(job) {
+  const r = await api(`/jobs/${enc(job)}/codes?since=9007199254740991`);
+  const s = r.settings;
+  const open = Boolean(adminToken());
+  const off = open ? '' : ' disabled';
+  return `<section class="panel" id="codes-panel" data-codes-job="${esc(job)}">
+    <h2>Piece codes <span class="muted">· ${s.enabled ? 'on' : 'off'} · ${num(r.count)} code${r.count === 1 ? '' : 's'}</span></h2>
+    <p class="muted">For jobs where every piece has its own code (a mark with 40 pieces has 40 codes): scanning a code loads or truck checks that one piece. Off, the job works by mark as usual.${open ? '' : ' Changing this needs the admin code.'}</p>
+    ${open ? '' : '<p><button class="btn" type="button" data-unlock>Enter code to change</button></p>'}
+    <form id="form-codes" class="codes-form">
+      <label class="check"><input type="checkbox" id="codes-enabled"${s.enabled ? ' checked' : ''}${off}> Piece codes on for job ${esc(job)}</label>
+      <div class="field"><label for="codes-pattern">What a code looks like</label>
+        <input type="text" id="codes-pattern" value="${esc(s.pattern)}" spellcheck="false" autocomplete="off"${off}>
+        <div class="help">A regex. A scan the job's list doesn't have yet counts as a code when it matches this, and as a mark when it doesn't. Blank: <code>${esc('^[A-Za-z0-9]{12,}$')}</code> (12 or more letters and digits, no dashes). A named group <code>(?&lt;code&gt;…)</code> takes just that part of the scan, e.g. <code>${esc('id=(?<code>[A-Z0-9]+)')}</code> for a QR code holding a link.</div></div>
+      <label class="check"><input type="checkbox" id="codes-learn"${s.learn ? ' checked' : ''}${off}> A code not on the list is paired on the iPad (scan the code, then its mark). Off: it is refused.</label>
+      <p><button class="btn primary" type="submit"${off}>Save</button> <span id="codes-saved" class="muted"></span></p>
+    </form>
+    <h3>Add codes</h3>
+    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status…), or paste one code per line: code, mark, sequence. Importing the same export again later refreshes each piece's status.</p>
+    <p><input type="file" id="codes-file" accept=".csv,.txt,.tsv,text/csv,text/plain"${off}></p>
+    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence (sequence is optional). Paste from a spreadsheet works too."${off}></textarea>
+    <label class="check"><input type="checkbox" id="codes-overwrite"${off}> Move a code already paired with another mark to the mark in this list</label>
+    <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
+      <button class="btn" type="button" data-codes-clear${off || (r.count ? '' : ' disabled')}>Remove all ${num(r.count)} codes</button></p>
+    <div id="codes-out"></div>
+  </section>`;
+}
+
+async function saveCodeSettings() {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#codes-saved');
+  out.textContent = 'Saving…';
+  try {
+    await api(`/admin/jobs/${enc(job)}/codes/settings`, { method: 'PUT', body: { enabled: $('#codes-enabled').checked, pattern: $('#codes-pattern').value.trim(), learn: $('#codes-learn').checked } });
+    await draw();
+    $('#codes-saved').textContent = 'Saved. The iPads use it now.';
+  } catch (err) {
+    out.textContent = err.message;
+    out.className = 'error';
+  }
+}
+
+async function importCodes() {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#codes-out');
+  out.textContent = 'Adding…';
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes/import`, { method: 'POST', body: { text: $('#codes-text').value, overwrite: $('#codes-overwrite').checked } });
+    const lines = [`Read ${num(r.read)} line${r.read === 1 ? '' : 's'}: ${num(r.added)} added, ${num(r.updated)} changed, ${num(r.unchanged)} already there.`];
+    if (r.conflictCount) lines.push(`${num(r.conflictCount)} already paired with another mark, left as they were (tick “Move a code…” to change them): ${r.conflicts.map((c) => `${esc(c.code)} is ${esc(c.mark)}, not ${esc(c.wanted)}`).join('; ')}`);
+    if (r.errorCount) lines.push(`${num(r.errorCount)} line${r.errorCount === 1 ? '' : 's'} skipped: ${r.errors.map(esc).join(' ')}`);
+    const statuses = Object.entries(r.statuses ?? {});
+    const pattern = $('#codes-pattern')?.value.trim();
+    await draw();
+    let html = lines.map((l, i) => `<p class="${i ? 'error' : 'ok-text'}">${l}</p>`).join('');
+    if (r.bom && r.bom.inBom < r.bom.marks) html += `<p class="${r.bom.inBom * 2 < r.bom.marks ? 'error' : 'muted'}">${num(r.bom.inBom)} of the list’s ${num(r.bom.marks)} marks are in this job’s BOM.${r.bom.inBom * 2 < r.bom.marks ? ' Is this list for another job?' : ''}</p>`;
+    if (statuses.length) html += `<p class="muted">Status in the file (kept, but not shown on the iPads: it isn’t live): ${statuses.map(([k, n]) => `${esc(k)} ${num(n)}`).join(' · ')}</p>`;
+    if (r.suggestedPattern && r.suggestedPattern !== pattern) {
+      html += `<p class="muted">These codes all look like <code>${esc(r.suggestedPattern)}</code>. <button class="btn" type="button" data-codes-pattern="${esc(r.suggestedPattern)}">Use it as the code pattern</button></p>`;
+    }
+    $('#codes-out').innerHTML = html;
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+let clearArmedAt = 0;
+async function clearCodes(btn) {
+  const job = $('#codes-panel').dataset.codesJob;
+  if (Date.now() - clearArmedAt > 5000) {
+    clearArmedAt = Date.now();
+    btn.textContent = 'Tap again to remove them all';
+    return;
+  }
+  clearArmedAt = 0;
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes`, { method: 'DELETE' });
+    await draw();
+    $('#codes-out').innerHTML = `<p class="ok-text">Removed ${num(r.removed)} codes.</p>`;
+  } catch (err) {
+    $('#codes-out').innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
 }
 
 async function pageLoad(loadId, query) {
@@ -486,7 +648,7 @@ async function pageLoad(loadId, query) {
       ${st.items.map((e, i) => {
         const scan = check.checked.get(e.id);
         return `<tr class="${e.pending ? 'pending' : ''}${e.manual ? ' manual' : ''}">
-          <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a></td><td>${esc(e.sequence)}</td>
+          <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a>${e.code ? `<br><span class="muted code">${esc(e.code)}</span>` : ''}</td><td>${esc(e.sequence)}</td>
           <td>${e.pending ? 'Waiting on PowerFab…' : e.removing ? 'Being taken off…' : esc(e.description ?? '')}${e.manual ? ' <span class="pill warn">typed</span>' : ''}</td>
           <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td>${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
           ${state.truckCheck ? `<td>${scan ? `✓ ${who(scan.scannedBy, 'solo')}` : ''}</td>` : ''}</tr>`;
@@ -1255,7 +1417,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1371,6 +1533,17 @@ function bind() {
     start();
   });
   $('#main').addEventListener('submit', async (e) => {
+    if (e.target.id === 'form-open-job') {
+      e.preventDefault();
+      const job = $('#open-job').value.trim();
+      if (job) location.hash = `#/job/${enc(job)}`;
+      return;
+    }
+    if (e.target.id === 'form-bom') {
+      e.preventDefault();
+      uploadBom();
+      return;
+    }
     if (e.target.id === 'form-settings') {
       e.preventDefault();
       const out = $('#settings-saved');
@@ -1386,6 +1559,11 @@ function bind() {
       }
       return;
     }
+    if (e.target.id === 'form-codes') {
+      e.preventDefault();
+      saveCodeSettings();
+      return;
+    }
     if (e.target.id === 'form-merge') {
       e.preventDefault();
       mergeDevice(e.target);
@@ -1394,6 +1572,15 @@ function bind() {
     if (e.target.id !== 'form-device') return;
     e.preventDefault();
     saveDevice(e.target, { name: $('#device-name').value });
+  });
+  $('#main').addEventListener('change', async (e) => {
+    if (e.target.id !== 'codes-file' || !e.target.files?.[0]) return;
+    // Reads the export here and puts it in the box, so what will be added can be seen first.
+    const file = e.target.files[0];
+    if (file.size > 20 * 1024 * 1024) { $('#codes-out').innerHTML = '<p class="error">That file is over 20 MB.</p>'; return; }
+    $('#codes-text').value = await file.text();
+    const rows = $('#codes-text').value.split('\n').filter((l) => l.trim()).length;
+    $('#codes-out').innerHTML = `<p class="muted">${esc(file.name)}: ${num(Math.max(rows - 1, 0))} rows read. Press “Add to the list”.</p>`;
   });
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
@@ -1414,6 +1601,10 @@ function bind() {
       else window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
+    if (t.closest('[data-codes-import]')) { importCodes(); return; }
+    if (t.closest('[data-bom-clear]')) { clearBom(t.closest('[data-bom-clear]')); return; }
+    if (t.closest('[data-codes-clear]')) { clearCodes(t.closest('[data-codes-clear]')); return; }
+    if (t.closest('[data-codes-pattern]')) { $('#codes-pattern').value = t.closest('[data-codes-pattern]').dataset.codesPattern; saveCodeSettings(); return; }
     if (t.closest('[data-show-qr]')) { showSetupQr(); return; }
     if (t.closest('[data-hide-qr]')) { qrHtml = ''; $('#setup-qr').innerHTML = QR_BUTTON; return; }
     if (t.closest('[data-lock-now]')) { lockNow(); return; }

@@ -41,6 +41,13 @@ builder.Services.AddSingleton<Hub>();
 builder.Services.AddHttpClient("conversion", c => c.Timeout = TimeSpan.FromSeconds(90));
 var uploadLimit = settings.Photos.MaxBytes * settings.Photos.MaxFiles + 1024 * 1024;
 builder.Services.Configure<FormOptions>(o => o.MultipartBodyLengthLimit = uploadLimit);
+// A load's stacks go to the app as JSON on every change, and a load can hold thousands of pieces:
+// compressed, that is about a tenth of the bytes over the shop Wi-Fi.
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.MimeTypes = [.. Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes, "application/problem+json", "application/manifest+json"];
+});
 builder.Services.AddCors(options => options.AddDefaultPolicy(policy =>
     policy.WithOrigins(settings.CorsOrigins).WithHeaders("Authorization", "Content-Type", "X-Terra-Device", "X-Terra-Version", AdminLock.Header).WithMethods("GET", "POST", "PUT", "DELETE")));
 
@@ -78,6 +85,7 @@ browser.ReadPowerFabJobs = async ct =>
 updater.ClientUpdated += v => hub.Broadcast(new { type = "client-updated", version = v });
 
 app.UseRequestStats(serverStats);
+app.UseResponseCompression();
 app.UseCors();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
 
@@ -124,7 +132,8 @@ app.Map("/ws", async (HttpContext http) =>
 {
     if (!http.WebSockets.IsWebSocketRequest)
         return Results.BadRequest("WebSocket only.");
-    var socket = await http.WebSockets.AcceptWebSocketAsync();
+    // Compressed (permessage-deflate, when the browser offers it): a load's stacks are mostly the same text over and over.
+    var socket = await http.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext { DangerousEnableCompression = true });
     // Live connections stay open for hours; end them as soon as the service is asked to stop,
     // or the stop waits on every connected iPad.
     using var stop = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, app.Lifetime.ApplicationStopping);
@@ -277,7 +286,11 @@ api.MapGet("/jobs/powerfab", async (IHttpClientFactory factory, CancellationToke
         }
     }
     var rows = found.Select(j => (j.Number, j.Description, j.Location, InPowerFab: true))
-        .Concat(mine.Keys.Where(k => !found.Any(f => f.Number.Equals(k, StringComparison.OrdinalIgnoreCase))).Select(k => (Number: k, Description: "", Location: "", InPowerFab: false)))
+        // Jobs the server has something for (stacks, piece codes, a BOM) that PowerFab didn't list:
+        // a job set up ahead of PowerFab access, say.
+        .Concat(mine.Keys.Concat(store.CodeJobs().Select(c => c.Job)).Concat(store.BomJobs().Select(b => b.Job))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(k => !found.Any(f => f.Number.Equals(k, StringComparison.OrdinalIgnoreCase))).Select(k => (Number: k, Description: "", Location: "", InPowerFab: false)))
         .OrderByDescending(j => j.Number, NumericOrder.Instance)
         .Select(j =>
         {
@@ -348,7 +361,7 @@ api.MapPost("/loads/{loadId}/ops", async (string loadId, JsonObject op, HttpCont
     {
         var (state, changed, activity) = await store.ApplyAsync(loadId, LoadOps.Str(op, "job"), LoadOps.Str(op, "loadNumber"), op, me);
         if (changed)
-            hub.Broadcast(new { type = "load", state, by = me.Id, op = LoadOps.Str(op, "op") });
+            hub.BroadcastLoad(state, me.Id, LoadOps.Str(op, "op"));
         if (activity.Count > 0)
             hub.Broadcast(new { type = "activity", items = activity });
         return Results.Json(new { state, changed }, Json.Options);
@@ -358,6 +371,120 @@ api.MapPost("/loads/{loadId}/ops", async (string loadId, JsonObject op, HttpCont
         return Results.Problem(ex.Message, statusCode: 400);
     }
 });
+
+// Several changes to one load in one go, applied in order: how the app sends what it has queued
+// (fast scanning, or catching up after being offline). Body: {"job", "loadNumber", "ops": [op, ...]}.
+// Answers the load as it now is and, per operation, {opId, changed, error}: one the load refuses
+// is skipped with its reason, and the rest still apply.
+api.MapPost("/loads/{loadId}/ops/batch", async (string loadId, JsonObject body, HttpContext http) =>
+{
+    var me = Me(http, required: true)!;
+    if (body["ops"] is not JsonArray list || list.Count == 0)
+        return Results.Problem("\"ops\" must be a list of operations.", statusCode: 400);
+    var ops = new List<JsonObject>(list.Count);
+    foreach (var node in list)
+    {
+        if (node is not JsonObject op)
+            return Results.Problem("Every operation is an object.", statusCode: 400);
+        ops.Add(op);
+    }
+    try
+    {
+        var job = LoadOps.Str(body, "job") is { Length: > 0 } j ? j : LoadOps.Str(ops[0], "job");
+        var number = LoadOps.Str(body, "loadNumber") is { Length: > 0 } n ? n : LoadOps.Str(ops[0], "loadNumber");
+        var (state, changed, activity, results) = await store.ApplyManyAsync(loadId, job, number, ops, me);
+        if (changed)
+        {
+            var names = ops.Select((op, i) => (op, i)).Where(x => results[x.i].Changed).Select(x => LoadOps.Str(x.op, "op")).ToList();
+            hub.BroadcastLoad(state, me.Id, names.FirstOrDefault(Hub.PowerFabOps.Contains) ?? names.LastOrDefault() ?? "");
+        }
+        if (activity.Count > 0)
+            hub.Broadcast(new { type = "activity", items = activity });
+        return Results.Json(new { state, changed, results = results.Select(r => new { opId = r.OpId, changed = r.Changed, error = r.Error }) }, Json.Options);
+    }
+    catch (OpException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// ---- Piece codes (docs/PIECE-CODES.md) --------------------------------------------------------
+
+object? BomMatch(string job, List<CodeLine> lines)
+{
+    var marks = store.Bom(job).Select(r => r.Mark).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    if (marks.Count == 0 || lines.Count == 0) return null;
+    var listMarks = lines.Select(l => l.Mark).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    return new { marks = listMarks.Count, inBom = listMarks.Count(marks.Contains) };
+}
+
+static object CodeView(PieceCode c) => new { id = c.Id, code = c.Code, mark = c.Mark, sequence = c.Sequence, source = c.Source, status = c.Status };
+
+// A job's piece code settings and its codes added after `since` (the app keeps a copy and asks for
+// what is new). `last` is the newest code's id: the next `since`.
+api.MapGet("/jobs/{job}/codes", (string job, long? since) =>
+{
+    var codes = store.Codes(job, since ?? 0);
+    return Results.Json(new { job, settings = store.CodeSettings(job), count = store.CodeCount(job), codes = codes.Select(CodeView), last = codes.Count > 0 ? codes[^1].Id : since ?? 0 }, Json.Options);
+});
+
+// One code: its mark, and the load it is on (if a row has it).
+api.MapGet("/jobs/{job}/codes/{code}", (string job, string code) =>
+{
+    var found = store.FindCode(job, code);
+    var on = store.CodeOnLoad(job, code);
+    if (found is null && on is null)
+        return Results.Problem($"No piece code {code} on job {job}.", statusCode: 404);
+    return Results.Json(new
+    {
+        code = found?.Code ?? code,
+        mark = found?.Mark ?? on?.Mark,
+        sequence = found?.Sequence,
+        source = found?.Source,
+        status = found?.Status,
+        load = on is { } o ? new { loadId = o.LoadId, loadNumber = o.LoadNumber } : null,
+    }, Json.Options);
+});
+
+// Pairs a code the list doesn't have with its piece's mark, from an iPad: {"code", "mark", "sequence"?}.
+// Only while the job's piece codes are on and set to pair. A code already paired with another mark is
+// refused (409); the admin board can change it.
+api.MapPost("/jobs/{job}/codes", (string job, CodeLine body, HttpContext http) =>
+{
+    var me = Me(http, required: true)!;
+    var settings = store.CodeSettings(job);
+    if (!settings.Enabled || !settings.Learn)
+        return Results.Problem($"Job {job} doesn't pair new piece codes on the iPads. Add them on the admin board.", statusCode: 403);
+    if (string.IsNullOrWhiteSpace(body.Code) || string.IsNullOrWhiteSpace(body.Mark) || body.Code.Trim().Length > LoadOps.MaxCodeLength)
+        return Results.Problem("A code and a mark are needed.", statusCode: 400);
+    var result = store.AddCodes(job, [body], "paired", me, overwrite: false);
+    if (result.Conflicts.FirstOrDefault() is { } clash)
+        return Results.Problem($"Code {clash.Code} is already paired with {clash.Mark}.", statusCode: 409);
+    if (result.Codes.Count > 0)
+        hub.Broadcast(new { type = "codes", job, codes = result.Codes.Select(CodeView) });
+    var code = store.FindCode(job, body.Code);
+    return Results.Json(new { added = result.Added, code = code is null ? null : CodeView(code) }, Json.Options);
+});
+
+// A mark's piece codes and which load has each (Piece lookup on the app).
+api.MapGet("/jobs/{job}/marks/{mark}/codes", (string job, string mark) =>
+    Results.Json(new
+    {
+        job,
+        mark,
+        codes = store.CodesOfMark(job, CodeList.CleanMark(mark)).Select(c => new { code = c.Code.Code, sequence = c.Code.Sequence, source = c.Code.Source, loadId = c.LoadId, loadNumber = c.LoadNumber }),
+    }, Json.Options));
+
+// ---- Job BOM (docs/JOB-BOM.md) -----------------------------------------------------------------
+
+api.MapGet("/jobs/{job}/bom/info", (string job) =>
+    store.BomInfo(job) is { } info ? Results.Json(new { job, info }, Json.Options) : Results.Problem($"Job {job} has no BOM.", statusCode: 404));
+
+// The job's BOM: what it is, and one row per assembly and transmittal. 404 when the slot is empty.
+api.MapGet("/jobs/{job}/bom", (string job, string? mark) =>
+    store.BomInfo(job) is { } info
+        ? Results.Json(new { job, info, rows = store.Bom(job, mark is null ? null : CodeList.CleanMark(mark)) }, Json.Options)
+        : Results.Problem($"Job {job} has no BOM.", statusCode: 404));
 
 api.MapGet("/activity", (string? device, string? job, string? load, string? mark, long? before, int? limit) =>
     store.History(device, job, load, mark, before, limit ?? 100));
@@ -476,6 +603,100 @@ admin.MapPost("/test-conversion", async (UrlRequest body, IHttpClientFactory fac
     if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
         return Results.Problem("That isn't an http:// or https:// address.", statusCode: 400);
     return Results.Json(await ConversionHealth(factory, url));
+});
+
+// Piece codes on the admin board: which jobs have them, a job's settings, pasting a list, clearing it.
+admin.MapGet("/codes", () => store.CodeJobs().Select(j => new { job = j.Job, settings = j.Settings, codes = j.Codes }));
+
+admin.MapPut("/jobs/{job}/codes/settings", (string job, PieceCodeSettings body, HttpContext http) =>
+{
+    try
+    {
+        var saved = store.SetCodeSettings(job, body, Me(http) ?? AdminDevice);
+        hub.Broadcast(new { type = "codes-settings", job, settings = saved });
+        return Results.Json(saved, Json.Options);
+    }
+    catch (OpException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+// Body: {"text": an export with a header line (Barcode, Assembly, Sequence, Status, ...) or
+// "code,mark[,sequence]" per line, "overwrite": true}. Overwrite moves a code already
+// paired with another mark to the mark in the list.
+admin.MapPost("/jobs/{job}/codes/import", (string job, CodeImport body, HttpContext http) =>
+{
+    var (lines, errors) = CodeList.Parse(body.Text ?? "");
+    if (lines.Count > 100_000)
+        return Results.Problem("At most 100,000 codes at once.", statusCode: 400);
+    var result = store.AddCodes(job, lines, "import", Me(http) ?? AdminDevice, body.Overwrite);
+    if (result.Codes.Count > 0)
+        hub.Broadcast(new { type = "codes", job, codes = result.Codes.Select(CodeView) });
+    return Results.Json(new
+    {
+        read = lines.Count,
+        added = result.Added,
+        updated = result.Updated,
+        unchanged = result.Unchanged,
+        conflicts = result.Conflicts.Take(50),
+        conflictCount = result.Conflicts.Count,
+        errors = errors.Take(50),
+        errorCount = errors.Count,
+        statuses = lines.Where(l => l.Status is not null).GroupBy(l => l.Status!).ToDictionary(g => g.Key, g => g.Count()),
+        suggestedPattern = CodeList.SuggestPattern(lines),
+        // With a BOM in the job's slot: how many of the list's marks it has (few means the list may
+        // be another job's).
+        bom = BomMatch(job, lines),
+    }, Json.Options);
+});
+
+admin.MapDelete("/jobs/{job}/codes", (string job, HttpContext http) =>
+{
+    var n = store.ClearCodes(job, Me(http) ?? AdminDevice);
+    hub.Broadcast(new { type = "codes-cleared", job });
+    return Results.Json(new { removed = n });
+});
+
+admin.MapGet("/boms", () => store.BomJobs().Select(j => new { job = j.Job, info = j.Info }));
+
+// Puts a BOM in the job's slot: the file itself as the body (an .xlsx or a CSV), its name in
+// X-File-Name. Replaces the BOM there.
+admin.MapPost("/jobs/{job}/bom", async (string job, HttpContext http) =>
+{
+    const int max = 50 * 1024 * 1024;
+    if (http.Request.ContentLength > max)
+        return Results.Problem("The BOM file is over 50 MB.", statusCode: 413);
+    using var buffer = new MemoryStream();
+    await http.Request.Body.CopyToAsync(buffer, http.RequestAborted);
+    if (buffer.Length == 0)
+        return Results.Problem("No file came with the request.", statusCode: 400);
+    if (buffer.Length > max)
+        return Results.Problem("The BOM file is over 50 MB.", statusCode: 413);
+    var name = Uri.UnescapeDataString(http.Request.Headers["X-File-Name"].FirstOrDefault() ?? "bom.xlsx");
+    try
+    {
+        var (rows, info) = BomReader.Read(buffer.ToArray(), name);
+        info = store.SaveBom(job, rows, info, Me(http) ?? AdminDevice);
+        hub.Broadcast(new { type = "bom", job, uploadedAt = info.UploadedAt });
+        return Results.Json(new
+        {
+            info,
+            // The BOM's own job number ("Our job #" on its Settings sheet), when it isn't this job.
+            otherJob = info.BomJob is { } j && !j.Equals(job, StringComparison.OrdinalIgnoreCase) ? j : null,
+        }, Json.Options);
+    }
+    catch (BomException ex)
+    {
+        return Results.Problem(ex.Message, statusCode: 400);
+    }
+});
+
+admin.MapDelete("/jobs/{job}/bom", (string job, HttpContext http) =>
+{
+    var removed = store.ClearBom(job, Me(http) ?? AdminDevice);
+    hub.Broadcast(new { type = "bom", job, uploadedAt = (string?)null });
+    return Results.Json(new { removed });
 });
 
 admin.MapGet("/photo-rules", () => RulesView());
@@ -1057,6 +1278,8 @@ static string? Doc(string name)
     {
         "setup" => "docs.SETUP.md",
         "photos" => "docs.PHOTOS.md",
+        "codes" => "docs.PIECE-CODES.md",
+        "bom" => "docs.JOB-BOM.md",
         _ => null,
     };
     if (resource is null)
@@ -1118,6 +1341,7 @@ public partial class Program
 
 public sealed record DeviceUpdate(string? Name, string? Color);
 public sealed record DeviceMerge(string? Into);
+public sealed record CodeImport(string? Text, bool Overwrite);
 public sealed record PinRequest(string? Pin);
 public sealed record PinChange(string? Current, string? Pin);
 public sealed record UrlRequest(string? Url);

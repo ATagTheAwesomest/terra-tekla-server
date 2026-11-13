@@ -48,6 +48,11 @@ public sealed class Store
         AddColumn(db, "stacks", "pallet", "TEXT");
         AddColumn(db, "check_scans", "qty", "INTEGER NOT NULL DEFAULT 1");
         AddColumn(db, "photos", "device_number", "INTEGER");
+        AddColumn(db, "entries", "code", "TEXT");
+        AddColumn(db, "check_scans", "code", "TEXT");
+        AddColumn(db, "piece_codes", "status", "TEXT");
+        AddColumn(db, "job_settings", "bom", "TEXT");
+        Exec(db, IndexesAfterColumns);
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
     }
 
@@ -94,6 +99,23 @@ public sealed class Store
         CREATE TABLE IF NOT EXISTS device_aliases (
             old_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, merged_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS device_aliases_device ON device_aliases (device_id);
+        CREATE INDEX IF NOT EXISTS entries_load ON entries (load_id, stack_id, position);
+        CREATE INDEX IF NOT EXISTS check_scans_load ON check_scans (load_id, position);
+        CREATE TABLE IF NOT EXISTS piece_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL COLLATE NOCASE, code TEXT NOT NULL COLLATE NOCASE,
+            mark TEXT NOT NULL, sequence TEXT, source TEXT NOT NULL, added_at TEXT NOT NULL, added_by TEXT);
+        CREATE UNIQUE INDEX IF NOT EXISTS piece_codes_code ON piece_codes (job, code);
+        CREATE INDEX IF NOT EXISTS piece_codes_mark ON piece_codes (job, mark COLLATE NOCASE);
+        CREATE TABLE IF NOT EXISTS job_settings (
+            job TEXT PRIMARY KEY COLLATE NOCASE, piece_codes TEXT, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS job_bom (
+            job TEXT NOT NULL COLLATE NOCASE, mark TEXT NOT NULL COLLATE NOCASE, transmittal TEXT NOT NULL COLLATE NOCASE,
+            row TEXT NOT NULL, PRIMARY KEY (job, mark, transmittal));
+        """;
+
+    // Indexes on columns added by AddColumn (databases made before them get the column first).
+    const string IndexesAfterColumns = """
+        CREATE INDEX IF NOT EXISTS entries_code ON entries (code COLLATE NOCASE) WHERE code IS NOT NULL;
         """;
 
     // Databases from before device numbers: add the column and number the devices in the order they
@@ -120,7 +142,8 @@ public sealed class Store
     {
         var db = new SqliteConnection(connectionString);
         db.Open();
-        Exec(db, "PRAGMA busy_timeout = 5000;");
+        // NORMAL is safe with WAL: an app crash loses nothing; only a power cut can lose the last moment of writes.
+        Exec(db, "PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;");
         return db;
     }
 
@@ -128,42 +151,121 @@ public sealed class Store
 
     /// <summary>
     /// Applies one operation from a device to a load and writes the result. Returns the load as it now
-    /// is, whether it changed, and the history lines written.
+    /// is, whether it changed, and the history lines written. A refused operation throws
+    /// <see cref="OpException"/> and changes nothing.
     /// </summary>
     public async Task<(LoadState State, bool Changed, List<Activity> Activity)> ApplyAsync(
         string loadId, string job, string loadNumber, JsonObject op, Device device)
     {
+        var (state, changed, activity, results) = await ApplyManyAsync(loadId, job, loadNumber, [op], device);
+        if (results[0].Error is { } error)
+            throw new OpException(error);
+        return (state, changed, activity);
+    }
+
+    /// <summary>The outcome of one operation of a batch: applied (and whether it changed anything), or refused.</summary>
+    public sealed record OpResult(string OpId, bool Changed, string? Error);
+
+    /// <summary>The most operations one batch can carry.</summary>
+    public const int MaxBatch = 500;
+
+    /// <summary>
+    /// Applies several operations to one load, in order, in one write: how an iPad sends what it has
+    /// queued (fast scanning, or catching up after being offline). An operation the load refuses is
+    /// skipped and reported; the rest still apply.
+    /// </summary>
+    public async Task<(LoadState State, bool Changed, List<Activity> Activity, List<OpResult> Results)> ApplyManyAsync(
+        string loadId, string job, string loadNumber, IReadOnlyList<JsonObject> ops, Device device)
+    {
+        if (ops.Count > MaxBatch)
+            throw new OpException($"At most {MaxBatch} operations at once.");
         await gate.WaitAsync();
         try
         {
             using var db = Open();
+            var known = Exists(db, loadId);
             var state = LoadOrNew(db, loadId, job, loadNumber);
             if (job != "")
                 state.Job = job;
             if (loadNumber != "")
                 state.LoadNumber = loadNumber;
             var work = state.Clone();
-            var ctx = new OpContext(device.Id, device.Name, rev + 1, DateTime.UtcNow);
-            var (changed, items) = LoadOps.Apply(work, op, ctx);
+            var now = DateTime.UtcNow;
+            var nextRev = rev;
+            var anyChanged = false;
+            var results = new List<OpResult>(ops.Count);
+            var lines = new List<(OpContext Ctx, ActivityItem Item)>();
+            Func<string, string?> codeElsewhere = code => CodeOnOtherLoad(db, work.Job, loadId, code);
+            for (var i = 0; i < ops.Count; i++)
+            {
+                var ctx = new OpContext(device.Id, device.Name, nextRev + 1, now, codeElsewhere);
+                try
+                {
+                    var (changed, items) = LoadOps.Apply(work, ops[i], ctx);
+                    if (changed)
+                    {
+                        nextRev = ctx.Rev;
+                        anyChanged = true;
+                    }
+                    lines.AddRange(items.Select(a => (ctx, a)));
+                    results.Add(new OpResult(LoadOps.Str(ops[i], "opId"), changed, null));
+                }
+                catch (OpException ex)
+                {
+                    results.Add(new OpResult(LoadOps.Str(ops[i], "opId"), false, ex.Message));
+                    // An operation checks before it changes anything, but in case one didn't: start
+                    // again from the load as it was and apply the ones that went through.
+                    work = state.Clone();
+                    nextRev = rev;
+                    anyChanged = false;
+                    lines.Clear();
+                    for (var j = 0; j < i; j++)
+                    {
+                        if (results[j].Error is not null)
+                            continue;
+                        var again = new OpContext(device.Id, device.Name, nextRev + 1, now, codeElsewhere);
+                        var (changed, items) = LoadOps.Apply(work, ops[j], again);
+                        if (changed)
+                        {
+                            nextRev = again.Rev;
+                            anyChanged = true;
+                        }
+                        lines.AddRange(items.Select(a => (again, a)));
+                    }
+                }
+            }
 
             using var tx = db.BeginTransaction();
-            if (changed)
+            if (anyChanged)
             {
-                rev = ctx.Rev;
+                rev = nextRev;
                 Exec(db, "INSERT INTO meta (key, value) VALUES ('rev', $v) ON CONFLICT (key) DO UPDATE SET value = $v", ("$v", rev.ToString()));
             }
-            if (changed || items.Count > 0 || !Exists(db, loadId))
-                Save(db, work);
-            var written = items.Select(a => AddActivity(db, ctx.NowIso, device, a.Kind, work.Job, work.LoadId, work.LoadNumber, a.StackId, a.StackName, a.Mark, a.Text)).ToList();
+            if (anyChanged || lines.Count > 0 || !known)
+                Save(db, known ? state : null, work);
+            var written = lines.Select(l => AddActivity(db, l.Ctx.NowIso, device, l.Item.Kind, work.Job, work.LoadId, work.LoadNumber, l.Item.StackId, l.Item.StackName, l.Item.Mark, l.Item.Text)).ToList();
             tx.Commit();
             loads[loadId] = work;
-            return (work, changed, written);
+            return (work, anyChanged, written, results);
+        }
+        catch
+        {
+            // The database write failed: what is in memory may be ahead of it, so read it again next time.
+            loads.Remove(loadId);
+            throw;
         }
         finally
         {
             gate.Release();
         }
     }
+
+    /// <summary>The load number of another load of the job that has a piece with this code, or null.</summary>
+    static string? CodeOnOtherLoad(SqliteConnection db, string job, string loadId, string code) =>
+        Scalar(db, """
+            SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id
+            WHERE e.code = $code COLLATE NOCASE AND e.load_id <> $load AND l.job = $job COLLATE NOCASE LIMIT 1
+            """, ("$code", code), ("$load", loadId), ("$job", job)) as string;
 
     /// <summary>A load's stacks, or a fresh one-stack load when the server hasn't seen it.</summary>
     public async Task<LoadState> GetAsync(string loadId, string job, string loadNumber)
@@ -249,7 +351,7 @@ public sealed class Store
             }, ("$id", loadId));
         var byId = s.Stacks.ToDictionary(st => st.Id);
         foreach (var (stackId, entry) in Rows(db, """
-            SELECT stack_id, id, mark, sequence, manual, pending, removing, scanned_at, scanned_by, added_at, rev, details
+            SELECT stack_id, id, mark, sequence, manual, pending, removing, scanned_at, scanned_by, added_at, rev, details, code
             FROM entries WHERE load_id = $id ORDER BY position
             """, r => (r.GetString(0), new Entry
         {
@@ -264,6 +366,7 @@ public sealed class Store
             AddedAt = r.GetString(9),
             Rev = r.GetInt64(10),
             Details = r.IsDBNull(11) ? null : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(r.GetString(11)),
+            Code = r.IsDBNull(12) ? null : r.GetString(12),
         }), ("$id", loadId)))
         {
             if (byId.TryGetValue(stackId, out var stack))
@@ -272,14 +375,18 @@ public sealed class Store
         if (s.Stacks.Count == 0)
             s.Stacks.Add(new Stack { Id = LoadOps.DefaultStackId(loadId), Name = $"Stack {s.LoadNumber} - 1" });
         if (s.TruckCheck is not null)
-            s.TruckCheck.Scans = Rows(db, "SELECT id, mark, manual, scanned_at, scanned_by, qty FROM check_scans WHERE load_id = $id ORDER BY position",
-                r => new CheckScan { Id = r.GetString(0), Mark = r.GetString(1), Manual = r.GetInt64(2) != 0, ScannedAt = r.GetString(3), ScannedBy = r.IsDBNull(4) ? null : r.GetString(4), Qty = (int)Math.Max(1, r.GetInt64(5)) },
+            s.TruckCheck.Scans = Rows(db, "SELECT id, mark, manual, scanned_at, scanned_by, qty, code FROM check_scans WHERE load_id = $id ORDER BY position",
+                r => new CheckScan { Id = r.GetString(0), Mark = r.GetString(1), Manual = r.GetInt64(2) != 0, ScannedAt = r.GetString(3), ScannedBy = r.IsDBNull(4) ? null : r.GetString(4), Qty = (int)Math.Max(1, r.GetInt64(5)), Code = r.IsDBNull(6) ? null : r.GetString(6) },
                 ("$id", loadId));
         return s;
     }
 
-    // Writes a load's whole state (it is small: a few hundred rows at most).
-    static void Save(SqliteConnection db, LoadState s)
+    /// <summary>
+    /// Writes a load: only what changed since <paramref name="before"/> (the load as the database has
+    /// it), or everything when <paramref name="before"/> is null. A scan touches one row, so a load
+    /// with thousands of pieces costs no more to scan into than an empty one.
+    /// </summary>
+    static void Save(SqliteConnection db, LoadState? before, LoadState s)
     {
         Exec(db, """
             INSERT INTO loads (load_id, job, load_number, rev, updated_at, check_started_at, check_updated_at, recent_ops, removed)
@@ -291,33 +398,308 @@ public sealed class Store
             ("$at", s.UpdatedAt == "" ? DateTime.UtcNow.ToString("o") : s.UpdatedAt),
             ("$cs", s.TruckCheck?.StartedAt), ("$cu", s.TruckCheck?.UpdatedAt),
             ("$ops", JsonSerializer.Serialize(s.RecentOps)), ("$rm", JsonSerializer.Serialize(s.Removed)));
-        foreach (var table in new[] { "stacks", "entries", "check_scans" })
-            Exec(db, $"DELETE FROM {table} WHERE load_id = $id", ("$id", s.LoadId));
-        for (var si = 0; si < s.Stacks.Count; si++)
+
+        // Stacks: a handful per load, written again whenever any of them changed.
+        static string StackKey(Stack st) => $"{st.Id}\u0001{st.Name}\u0001{st.CreatedBy}\u0001{(st.Pallet is null ? "" : JsonSerializer.Serialize(st.Pallet, Json.Options))}";
+        if (before is null || !before.Stacks.Select(StackKey).SequenceEqual(s.Stacks.Select(StackKey)))
         {
-            var st = s.Stacks[si];
-            Exec(db, "INSERT INTO stacks (id, load_id, position, name, created_by, pallet) VALUES ($id, $load, $pos, $name, $by, $pallet)",
-                ("$id", st.Id), ("$load", s.LoadId), ("$pos", si), ("$name", st.Name), ("$by", st.CreatedBy),
-                ("$pallet", st.Pallet is null ? null : JsonSerializer.Serialize(st.Pallet, Json.Options)));
-            for (var i = 0; i < st.Items.Count; i++)
+            Exec(db, "DELETE FROM stacks WHERE load_id = $id", ("$id", s.LoadId));
+            for (var si = 0; si < s.Stacks.Count; si++)
             {
-                var e = st.Items[i];
-                Exec(db, """
-                    INSERT INTO entries (id, load_id, stack_id, position, mark, sequence, manual, pending, removing, scanned_at, scanned_by, added_at, rev, details)
-                    VALUES ($id, $load, $stack, $pos, $mark, $seq, $manual, $pending, $removing, $sat, $sby, $added, $rev, $details)
-                    """,
-                    ("$id", e.Id), ("$load", s.LoadId), ("$stack", st.Id), ("$pos", i), ("$mark", e.Mark), ("$seq", e.Sequence),
-                    ("$manual", e.Manual ? 1 : 0), ("$pending", e.Pending ? 1 : 0), ("$removing", e.Removing ? 1 : 0),
-                    ("$sat", e.ScannedAt), ("$sby", e.ScannedBy), ("$added", e.AddedAt), ("$rev", e.Rev),
-                    ("$details", e.Details is null ? null : JsonSerializer.Serialize(e.Details)));
+                var st = s.Stacks[si];
+                Exec(db, "INSERT INTO stacks (id, load_id, position, name, created_by, pallet) VALUES ($id, $load, $pos, $name, $by, $pallet)",
+                    ("$id", st.Id), ("$load", s.LoadId), ("$pos", si), ("$name", st.Name), ("$by", st.CreatedBy),
+                    ("$pallet", st.Pallet is null ? null : JsonSerializer.Serialize(st.Pallet, Json.Options)));
             }
         }
-        for (var i = 0; i < (s.TruckCheck?.Scans.Count ?? 0); i++)
+
+        // Rows: the ones added, changed or moved are written, the ones gone are deleted.
+        var had = new Dictionary<string, (string StackId, int Position, Entry Entry)>();
+        if (before is null)
+            Exec(db, "DELETE FROM entries WHERE load_id = $id", ("$id", s.LoadId));
+        else
+            foreach (var st in before.Stacks)
+                for (var i = 0; i < st.Items.Count; i++)
+                    had[st.Items[i].Id] = (st.Id, i, st.Items[i]);
+        using (var upsert = Prepare(db, """
+            INSERT INTO entries (id, load_id, stack_id, position, mark, sequence, manual, pending, removing, scanned_at, scanned_by, added_at, rev, details, code)
+            VALUES ($id, $load, $stack, $pos, $mark, $seq, $manual, $pending, $removing, $sat, $sby, $added, $rev, $details, $code)
+            ON CONFLICT (load_id, id) DO UPDATE SET stack_id = $stack, position = $pos, mark = $mark, sequence = $seq, manual = $manual,
+                pending = $pending, removing = $removing, scanned_at = $sat, scanned_by = $sby, added_at = $added, rev = $rev, details = $details, code = $code
+            """, "$id", "$load", "$stack", "$pos", "$mark", "$seq", "$manual", "$pending", "$removing", "$sat", "$sby", "$added", "$rev", "$details", "$code"))
         {
-            var c = s.TruckCheck!.Scans[i];
-            Exec(db, "INSERT INTO check_scans (id, load_id, position, mark, manual, scanned_at, scanned_by, qty) VALUES ($id, $load, $pos, $mark, $manual, $at, $by, $qty)",
-                ("$id", c.Id), ("$load", s.LoadId), ("$pos", i), ("$mark", c.Mark), ("$manual", c.Manual ? 1 : 0), ("$at", c.ScannedAt), ("$by", c.ScannedBy), ("$qty", Math.Max(1, c.Qty)));
+            foreach (var st in s.Stacks)
+                for (var i = 0; i < st.Items.Count; i++)
+                {
+                    var e = st.Items[i];
+                    if (had.Remove(e.Id, out var old) && old.StackId == st.Id && old.Position == i && SameRow(old.Entry, e))
+                        continue;
+                    Run(upsert, e.Id, s.LoadId, st.Id, i, e.Mark, e.Sequence, e.Manual ? 1 : 0, e.Pending ? 1 : 0, e.Removing ? 1 : 0,
+                        e.ScannedAt, e.ScannedBy, e.AddedAt, e.Rev, e.Details is null ? null : JsonSerializer.Serialize(e.Details), e.Code);
+                }
         }
+        if (had.Count > 0)
+        {
+            using var delete = Prepare(db, "DELETE FROM entries WHERE load_id = $load AND id = $id", "$load", "$id");
+            foreach (var id in had.Keys)
+                Run(delete, s.LoadId, id);
+        }
+
+        // Truck check scans: the same.
+        var hadScans = new Dictionary<string, (int Position, CheckScan Scan)>();
+        if (before is null)
+            Exec(db, "DELETE FROM check_scans WHERE load_id = $id", ("$id", s.LoadId));
+        else
+            for (var i = 0; i < (before.TruckCheck?.Scans.Count ?? 0); i++)
+                hadScans[before.TruckCheck!.Scans[i].Id] = (i, before.TruckCheck.Scans[i]);
+        var scans = s.TruckCheck?.Scans ?? [];
+        using (var upsert = Prepare(db, """
+            INSERT INTO check_scans (id, load_id, position, mark, manual, scanned_at, scanned_by, qty, code)
+            VALUES ($id, $load, $pos, $mark, $manual, $at, $by, $qty, $code)
+            ON CONFLICT (load_id, id) DO UPDATE SET position = $pos, mark = $mark, manual = $manual, scanned_at = $at, scanned_by = $by, qty = $qty, code = $code
+            """, "$id", "$load", "$pos", "$mark", "$manual", "$at", "$by", "$qty", "$code"))
+        {
+            for (var i = 0; i < scans.Count; i++)
+            {
+                var c = scans[i];
+                if (hadScans.Remove(c.Id, out var old) && old.Position == i && old.Scan.Mark == c.Mark && old.Scan.Qty == c.Qty
+                    && old.Scan.Code == c.Code && old.Scan.ScannedBy == c.ScannedBy && old.Scan.ScannedAt == c.ScannedAt && old.Scan.Manual == c.Manual)
+                    continue;
+                Run(upsert, c.Id, s.LoadId, i, c.Mark, c.Manual ? 1 : 0, c.ScannedAt, c.ScannedBy, Math.Max(1, c.Qty), c.Code);
+            }
+        }
+        if (hadScans.Count > 0)
+        {
+            using var delete = Prepare(db, "DELETE FROM check_scans WHERE load_id = $load AND id = $id", "$load", "$id");
+            foreach (var id in hadScans.Keys)
+                Run(delete, s.LoadId, id);
+        }
+    }
+
+    // Whether a row is unchanged. Its details only ever change together with its revision.
+    static bool SameRow(Entry a, Entry b) =>
+        a.Rev == b.Rev && a.Mark == b.Mark && a.Sequence == b.Sequence && a.Manual == b.Manual && a.Pending == b.Pending
+        && a.Removing == b.Removing && a.ScannedAt == b.ScannedAt && a.ScannedBy == b.ScannedBy && a.AddedAt == b.AddedAt && a.Code == b.Code;
+
+    // ---- Piece codes ---------------------------------------------------------------------
+
+    /// <summary>A job's piece code settings (off for a job never set up).</summary>
+    public PieceCodeSettings CodeSettings(string job)
+    {
+        using var db = Open();
+        var json = Scalar(db, "SELECT piece_codes FROM job_settings WHERE job = $job", ("$job", job)) as string;
+        return json is null ? PieceCodeSettings.Off : JsonSerializer.Deserialize<PieceCodeSettings>(json, Json.Options) ?? PieceCodeSettings.Off;
+    }
+
+    /// <summary>Every job with piece codes switched on, or with codes on file.</summary>
+    public List<(string Job, PieceCodeSettings Settings, int Codes)> CodeJobs()
+    {
+        using var db = Open();
+        var counts = Rows(db, "SELECT job, COUNT(*) FROM piece_codes GROUP BY job", r => (r.GetString(0), r.GetInt32(1)))
+            .ToDictionary(x => x.Item1, x => x.Item2, StringComparer.OrdinalIgnoreCase);
+        var settings = Rows(db, "SELECT job, piece_codes FROM job_settings WHERE piece_codes IS NOT NULL", r => (r.GetString(0), r.GetString(1)))
+            .ToDictionary(x => x.Item1, x => JsonSerializer.Deserialize<PieceCodeSettings>(x.Item2, Json.Options) ?? PieceCodeSettings.Off, StringComparer.OrdinalIgnoreCase);
+        return settings.Keys.Union(counts.Keys, StringComparer.OrdinalIgnoreCase)
+            .Select(job => (job, settings.GetValueOrDefault(job) ?? PieceCodeSettings.Off, counts.GetValueOrDefault(job)))
+            .OrderBy(x => x.job, NumericOrder.Instance).ToList();
+    }
+
+    public PieceCodeSettings SetCodeSettings(string job, PieceCodeSettings wanted, Device by)
+    {
+        var settings = wanted with { Pattern = PieceCodeSettings.CheckPattern(wanted.Pattern) };
+        using var db = Open();
+        var before = CodeSettings(job);
+        Exec(db, """
+            INSERT INTO job_settings (job, piece_codes, updated_at) VALUES ($job, $json, $at)
+            ON CONFLICT (job) DO UPDATE SET piece_codes = $json, updated_at = $at
+            """, ("$job", job), ("$json", JsonSerializer.Serialize(settings, Json.Options)), ("$at", DateTime.UtcNow.ToString("o")));
+        if (before != settings)
+            AddActivity(db, DateTime.UtcNow.ToString("o"), by, "codes-settings", job, null, null, null, null, null,
+                settings.Enabled
+                    ? $"Piece codes on for job {job} (pattern {settings.Pattern}; codes not on the list are {(settings.Learn ? "paired on the iPad" : "refused")})"
+                    : $"Piece codes off for job {job}");
+        return settings;
+    }
+
+    public int CodeCount(string job)
+    {
+        using var db = Open();
+        return Convert.ToInt32(Scalar(db, "SELECT COUNT(*) FROM piece_codes WHERE job = $job", ("$job", job)) ?? 0);
+    }
+
+    /// <summary>A job's codes added after <paramref name="since"/> (a code's id), oldest first.</summary>
+    public List<PieceCode> Codes(string job, long since = 0, int limit = 100_000)
+    {
+        using var db = Open();
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND id > $since ORDER BY id LIMIT $limit",
+            ReadCode, ("$job", job), ("$since", since), ("$limit", Math.Clamp(limit, 1, 100_000)));
+    }
+
+    public PieceCode? FindCode(string job, string code)
+    {
+        using var db = Open();
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND code = $code",
+            ReadCode, ("$job", job), ("$code", code.Trim())).FirstOrDefault();
+    }
+
+    static PieceCode ReadCode(SqliteDataReader r) =>
+        new(r.GetInt64(0), r.GetString(1), r.GetString(2), N(r, 3), r.GetString(4), r.GetString(5), N(r, 6), N(r, 7));
+
+    /// <summary>
+    /// Adds codes to a job. A code already there with the same mark is left as it is (its sequence is
+    /// filled in if it had none). One already there with another mark is a conflict, left as it is,
+    /// unless <paramref name="overwrite"/> (the admin board's import) moves it to the new mark.
+    /// A changed or new code gets a new id, so the iPads' "since" read picks it up.
+    /// </summary>
+    public CodesAdded AddCodes(string job, IReadOnlyList<CodeLine> lines, string source, Device by, bool overwrite)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var now = DateTime.UtcNow.ToString("o");
+        int added = 0, updated = 0, unchanged = 0;
+        var conflicts = new List<CodeConflict>();
+        using var find = Prepare(db, "SELECT mark, sequence, status FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
+        using var delete = Prepare(db, "DELETE FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
+        using var insert = Prepare(db, "INSERT INTO piece_codes (job, code, mark, sequence, source, added_at, added_by, status) VALUES ($job, $code, $mark, $seq, $source, $at, $by, $status)",
+            "$job", "$code", "$mark", "$seq", "$source", "$at", "$by", "$status");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in lines)
+        {
+            var code = line.Code.Trim();
+            var mark = CodeList.CleanMark(line.Mark);
+            if (code == "" || mark == "" || !seen.Add(code))
+                continue;
+            find.Parameters[0].Value = job;
+            find.Parameters[1].Value = code;
+            string? oldMark = null, oldSeq = null, oldStatus = null;
+            using (var r = find.ExecuteReader())
+                if (r.Read())
+                {
+                    oldMark = r.GetString(0);
+                    oldSeq = N(r, 1);
+                    oldStatus = N(r, 2);
+                }
+            if (oldMark is not null)
+            {
+                var sameMark = oldMark.Equals(mark, StringComparison.OrdinalIgnoreCase);
+                if (!sameMark && !overwrite)
+                {
+                    conflicts.Add(new CodeConflict(code, oldMark, mark));
+                    continue;
+                }
+                if (sameMark && (line.Sequence is null || line.Sequence == oldSeq) && (line.Status is null || line.Status == oldStatus))
+                {
+                    unchanged++;
+                    continue;
+                }
+                Run(delete, job, code);
+                Run(insert, job, code, mark, line.Sequence ?? (sameMark ? oldSeq : null), source, now, by.Id, line.Status ?? oldStatus);
+                updated++;
+                continue;
+            }
+            Run(insert, job, code, mark, line.Sequence, source, now, by.Id, line.Status);
+            added++;
+        }
+        var count = added + updated;
+        if (count > 0 || conflicts.Count > 0)
+            AddActivity(db, now, by, source == "paired" ? "code-pair" : "codes-import", job, null, null, null, null,
+                source == "paired" && lines.Count == 1 ? lines[0].Mark : null,
+                source == "paired" && lines.Count == 1 && count == 1
+                    ? $"Paired code {lines[0].Code.Trim()} with {CodeList.CleanMark(lines[0].Mark)}"
+                    : $"Piece codes for job {job}: {added} added, {updated} changed, {unchanged} already there{(conflicts.Count > 0 ? $", {conflicts.Count} paired with another mark (left as they were)" : "")}");
+        tx.Commit();
+        var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
+            ReadCode, ("$job", job), ("$at", now));
+        return new CodesAdded(added, updated, unchanged, conflicts, fresh);
+    }
+
+    // ---- Job BOM (JobBom.cs) ----------------------------------------------------------------
+
+    /// <summary>Puts a BOM in a job's slot, replacing the one there.</summary>
+    public BomInfo SaveBom(string job, List<BomRow> rows, BomInfo info, Device by)
+    {
+        info = info with { UploadedBy = by.Name };
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        Exec(db, "DELETE FROM job_bom WHERE job = $job", ("$job", job));
+        using var insert = Prepare(db, "INSERT OR REPLACE INTO job_bom (job, mark, transmittal, row) VALUES ($job, $mark, $tl, $row)", "$job", "$mark", "$tl", "$row");
+        foreach (var r in rows)
+            Run(insert, job, r.Mark, r.Transmittal ?? "", JsonSerializer.Serialize(r, Json.Options));
+        Exec(db, """
+            INSERT INTO job_settings (job, bom, updated_at) VALUES ($job, $json, $at)
+            ON CONFLICT (job) DO UPDATE SET bom = $json, updated_at = $at
+            """, ("$job", job), ("$json", JsonSerializer.Serialize(info, Json.Options)), ("$at", info.UploadedAt));
+        AddActivity(db, info.UploadedAt, by, "bom", job, null, null, null, null, null,
+            $"BOM for job {job}: {info.FileName} ({info.Assemblies:N0} assemblies{(info.Transmittals.Count > 0 ? $", {string.Join(", ", info.Transmittals)}" : "")})");
+        tx.Commit();
+        return info;
+    }
+
+    public BomInfo? BomInfo(string job)
+    {
+        using var db = Open();
+        return Scalar(db, "SELECT bom FROM job_settings WHERE job = $job", ("$job", job)) is string json
+            ? JsonSerializer.Deserialize<BomInfo>(json, Json.Options) : null;
+    }
+
+    /// <summary>Every job with a BOM in its slot.</summary>
+    public List<(string Job, BomInfo Info)> BomJobs()
+    {
+        using var db = Open();
+        return Rows(db, "SELECT job, bom FROM job_settings WHERE bom IS NOT NULL", r => (r.GetString(0), JsonSerializer.Deserialize<BomInfo>(r.GetString(1), Json.Options)!))
+            .OrderBy(x => x.Item1, NumericOrder.Instance).ToList();
+    }
+
+    public List<BomRow> Bom(string job, string? mark = null)
+    {
+        using var db = Open();
+        return mark is null
+            ? Rows(db, "SELECT row FROM job_bom WHERE job = $job ORDER BY rowid", r => JsonSerializer.Deserialize<BomRow>(r.GetString(0), Json.Options)!, ("$job", job))
+            : Rows(db, "SELECT row FROM job_bom WHERE job = $job AND mark = $mark ORDER BY rowid", r => JsonSerializer.Deserialize<BomRow>(r.GetString(0), Json.Options)!, ("$job", job), ("$mark", mark));
+    }
+
+    public bool ClearBom(string job, Device by)
+    {
+        using var db = Open();
+        var info = BomInfo(job);
+        Exec(db, "DELETE FROM job_bom WHERE job = $job", ("$job", job));
+        Exec(db, "UPDATE job_settings SET bom = NULL WHERE job = $job", ("$job", job));
+        if (info is not null)
+            AddActivity(db, DateTime.UtcNow.ToString("o"), by, "bom", job, null, null, null, null, null, $"Removed the BOM of job {job} ({info.FileName})");
+        return info is not null;
+    }
+
+    /// <summary>A mark's piece codes, each with the load whose row has it (if any).</summary>
+    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark)
+    {
+        using var db = Open();
+        return Rows(db, """
+            SELECT p.id, p.code, p.mark, p.sequence, p.source, p.added_at, p.added_by, p.status,
+                   (SELECT l.load_id FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
+                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1)
+            FROM piece_codes p WHERE p.job = $job AND p.mark = $mark COLLATE NOCASE ORDER BY p.code
+            """, r => (ReadCode(r), N(r, 8), N(r, 9)), ("$job", job), ("$mark", mark));
+    }
+
+    /// <summary>Removes every code of a job (rows already loaded keep the code they were scanned with).</summary>
+    public int ClearCodes(string job, Device by)
+    {
+        using var db = Open();
+        var n = Convert.ToInt32(Scalar(db, "SELECT COUNT(*) FROM piece_codes WHERE job = $job", ("$job", job)) ?? 0);
+        Exec(db, "DELETE FROM piece_codes WHERE job = $job", ("$job", job));
+        if (n > 0)
+            AddActivity(db, DateTime.UtcNow.ToString("o"), by, "codes-clear", job, null, null, null, null, null, $"Removed all {n} piece codes of job {job}");
+        return n;
+    }
+
+    /// <summary>Where a code is now: the load and mark of the row that has it, if any.</summary>
+    public (string LoadId, string LoadNumber, string Mark)? CodeOnLoad(string job, string code)
+    {
+        using var db = Open();
+        return Rows(db, """
+            SELECT e.load_id, l.load_number, e.mark FROM entries e JOIN loads l ON l.load_id = e.load_id
+            WHERE e.code = $code COLLATE NOCASE AND l.job = $job COLLATE NOCASE LIMIT 1
+            """, r => (r.GetString(0), r.GetString(1), r.GetString(2)), ("$code", code.Trim()), ("$job", job)).Select(x => ((string, string, string)?)x).FirstOrDefault();
     }
 
     // ---- Devices -----------------------------------------------------------------------
@@ -646,6 +1028,23 @@ public sealed class Store
         foreach (var (name, value) in args)
             cmd.Parameters.AddWithValue(name, value ?? DBNull.Value);
         return cmd;
+    }
+
+    // A statement run many times with different values (in the order its parameters are named).
+    static SqliteCommand Prepare(SqliteConnection db, string sql, params string[] names)
+    {
+        var cmd = db.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var name in names)
+            cmd.Parameters.Add(new SqliteParameter { ParameterName = name });
+        return cmd;
+    }
+
+    static void Run(SqliteCommand cmd, params object?[] values)
+    {
+        for (var i = 0; i < values.Length; i++)
+            cmd.Parameters[i].Value = values[i] ?? DBNull.Value;
+        cmd.ExecuteNonQuery();
     }
 
     static void Exec(SqliteConnection db, string sql, params (string, object?)[] args)
