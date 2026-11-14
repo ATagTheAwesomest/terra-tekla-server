@@ -1001,6 +1001,39 @@ function lastDays(days) {
   return out;
 }
 
+// Speed (docs/SPEED.md): how long scans take on each device, and where the time goes in PowerFab.
+// The bridge runs one PowerFab command at a time, so a slow read holds up every scan behind it.
+const msText = (ms) => (ms >= 10000 ? `${(ms / 1000).toFixed(0)} s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${num(ms)} ms`);
+function speedPanel(pf, scans) {
+  if (!pf || !scans) return '';
+  const slow = (ms) => (ms >= 3000 ? ' class="error"' : '');
+  const devs = scans.devices ?? [];
+  return `<section class="panel speed"><h2>Speed <span class="muted">· since the server started, in memory only</span></h2>
+    <div class="grid">
+      <div>
+        <h3>Scans on each device</h3>
+        <p class="muted">From the scan on the device to PowerFab having it loaded. “Waited” is time spent behind the scans before it.</p>
+        ${devs.length ? `<table><thead><tr><th>Device</th><th class="num">Scans</th><th class="num">Average</th><th class="num">Slowest</th><th class="num">Waited, avg</th><th>Last</th></tr></thead><tbody>
+          ${devs.map((d) => `<tr><td>${esc(d.device)}</td><td class="num">${num(d.scans)}</td><td class="num"${slow(d.averageMs)}>${msText(d.averageMs)}</td><td class="num"${slow(d.slowestMs)}>${msText(d.slowestMs)}</td><td class="num">${msText(d.averageWaitMs)}</td><td>${d.last ? esc(ago(d.last)) : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<p class="muted">No scan times yet (devices send them from app v0.26.0).</p>'}
+        ${scans.newest?.length ? `<details><summary>Last ${scans.newest.length} scans</summary><table class="small"><thead><tr><th>When</th><th>Device</th><th>Mark</th><th class="num">Total</th><th class="num">Waited</th><th>Steps</th></tr></thead><tbody>
+          ${scans.newest.map((x) => `<tr><td>${x.at ? esc(when(x.at)) : ''}</td><td>${esc(x.device)}</td><td>${esc(x.mark ?? '')}${x.ok === false ? ` <span class="error" title="${esc(x.error ?? '')}">refused</span>` : ''}</td><td class="num"${slow(x.totalMs ?? 0)}>${x.totalMs == null ? '' : msText(x.totalMs)}</td><td class="num">${msText(x.waitMs ?? 0)}${x.ahead ? ` <span class="muted">(${x.ahead} ahead)</span>` : ''}</td><td class="muted">${(x.steps ?? []).map((st) => `${esc(st.name)} ${msText(st.ms)}`).join(' · ')}</td></tr>`).join('')}
+        </tbody></table></details>` : ''}
+      </div>
+      <div>
+        <h3>PowerFab calls</h3>
+        <p class="muted">${pf.running ? `<b>${pf.running} running now.</b> ` : ''}The last ${num(pf.kept)} calls. Reads several devices asked for at once are shared, and a read is reused for a moment.</p>
+        ${pf.commands.length ? `<table><thead><tr><th>Command</th><th class="num">Calls</th><th class="num">Shared</th><th class="num">Average</th><th class="num">Slowest</th><th class="num">Reply</th></tr></thead><tbody>
+          ${pf.commands.map((c) => `<tr><td>${esc(c.command)}${c.errors ? ` <span class="error">${c.errors} failed</span>` : ''}</td><td class="num">${num(c.toPowerFab)}</td><td class="num">${num(c.sharedOrReused)}</td><td class="num"${slow(c.averageMs)}>${msText(c.averageMs)}</td><td class="num"${slow(c.slowestMs)}>${msText(c.slowestMs)}</td><td class="num">${bytes(c.averageBytes)}</td></tr>`).join('')}
+        </tbody></table>` : '<p class="muted">No PowerFab calls yet.</p>'}
+        ${pf.newest?.length ? `<details><summary>Last ${pf.newest.length} calls</summary><table class="small"><thead><tr><th>When</th><th>Command</th><th>Device</th><th class="num">Time</th><th class="num">Reply</th><th>How</th></tr></thead><tbody>
+          ${pf.newest.map((x) => `<tr><td>${esc(when(x.at))}</td><td>${esc(x.command)}${x.error || x.status >= 400 ? ` <span class="error" title="${esc(x.error ?? '')}">${x.status}</span>` : ''}</td><td>${esc(x.device ?? '')}</td><td class="num"${slow(x.ms)}>${msText(x.ms)}</td><td class="num">${bytes(x.bytes)}</td><td class="muted">${esc(x.how)}${x.waiting ? ` · ${x.waiting} ahead` : ''}</td></tr>`).join('')}
+        </tbody></table></details>` : ''}
+      </div>
+    </div>
+  </section>`;
+}
+
 async function pageServer() {
   const s = await api('/admin/stats');
   const p = s.process;
@@ -1031,6 +1064,7 @@ async function pageServer() {
     ${tile(bytes(p.memoryBytes), 'Memory', `${p.threads} threads · ${p.cpuSeconds} s CPU`)}
     ${tile(bytes(s.database.bytes + s.database.walBytes), 'Database', `${num(d.counts.loads)} loads · ${num(d.counts.activity)} history lines`)}
   </div>
+  ${speedPanel(s.powerFab, s.scans)}
   <div class="grid">
     <div>
       <section class="panel"><h2>Scans, last 14 days</h2>
@@ -1417,7 +1451,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a><a href="#/docs/speed" class="${name === 'speed' ? 'active' : ''}">Scan speed</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;

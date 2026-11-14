@@ -307,3 +307,10 @@ main, .grid > *, .panel, .stack { min-width: 0; }
   main { padding: .75rem; }
   .panel { padding: .8rem; }
 }
+
+/* Server page: Speed (docs/SPEED.md) */
+.speed h3 { margin: 4px 0 6px; font-size: 1rem; }
+.speed details { margin-top: 8px; }
+.speed summary { cursor: pointer; color: var(--muted, #aaa); }
+table.small { font-size: 0.85rem; }
+table.small td { vertical-align: top; }
