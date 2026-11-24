@@ -310,13 +310,13 @@ function fillPhotos() {
 let freshIds = new Set();
 
 async function pageHome() {
-  const [items] = await Promise.all([api('/activity?limit=80'), refreshHealth()]);
+  const [items] = await Promise.all([api(`/activity?limit=${RECENT}`), refreshHealth()]);
   const online = devices.filter((d) => d.online).length;
   return `<div class="grid">
     <div>
       <section class="panel">
         <h2>Devices <span class="muted">· ${online} connected</span></h2>
-        <div class="devices">${devices.length ? devices.map(deviceCard).join('') : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}</div>
+        ${devices.length ? `<div class="table-wrap"><table><thead><tr><th>Number</th><th>Name</th><th>Status</th><th>Last seen</th><th>App</th></tr></thead><tbody>${devices.map(deviceRow).join('')}</tbody></table></div>` : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}
         ${devices.length > 1 ? '<p class="muted">One iPad listed more than once (Safari and the home screen app, or the app installed again)? Open the extra one and merge it into the one to keep.</p>' : ''}
       </section>
       <section class="panel">
@@ -331,10 +331,19 @@ async function pageHome() {
     </div>
     <section class="panel">
       <h2>Recent activity</h2>
-      <div data-feed>${feed(items, { fresh: freshIds })}</div>
-      ${moreButton(items, 80)}
+      <div data-feed>${recent(items, '')}</div>
     </section>
   </div>`;
+}
+
+function deviceRow(d) {
+  return `<tr>
+    <td><span class="dot-swatch" style="--c:${esc(d.color)}"></span> ${esc(d.user ?? '')}</td>
+    <td><a href="#/device/${enc(d.id)}"><b>${esc(d.name)}</b></a></td>
+    <td>${d.online ? '<span class="pill ok">Connected</span>' : '<span class="muted">Not connected</span>'}</td>
+    <td data-v="${esc(d.lastSeenAt ?? '')}">${d.online ? 'Now' : esc(ago(d.lastSeenAt))}</td>
+    <td>${esc(d.appVersion ? `v${d.appVersion}` : '')}</td>
+  </tr>`;
 }
 
 function deviceCard(d) {
@@ -368,7 +377,7 @@ async function pageDevice(id) {
   const d = deviceOf(id);
   if (!d) return '<p class="error">No such device.</p>';
   const [items, photos] = await Promise.all([
-    api(`/activity?device=${enc(id)}&limit=100`),
+    api(`/activity?device=${enc(id)}&limit=${RECENT}`),
     health?.photosEnabled ? api(`/photos/recent?device=${enc(id)}&limit=24`).catch(() => []) : [],
   ]);
   const swatches = [...new Set([...PALETTE, d.color])].map((c) => `<button type="button" class="swatch${c === d.color ? ' on' : ''}" style="--c:${c}" data-color="${c}" aria-label="Colour ${c}"></button>`).join('');
@@ -394,8 +403,7 @@ async function pageDevice(id) {
     </div>
     <section class="panel">
       <h2>What ${esc(d.name)} did recently</h2>
-      <div data-feed>${feed(items, { empty: 'Nothing yet.', fresh: freshIds })}</div>
-      ${moreButton(items, 100)}
+      <div data-feed>${recent(items, `device=${enc(id)}`)}</div>
     </section>
   </div>`;
 }
@@ -450,7 +458,7 @@ async function pageJobs() {
     ${r.jobs.map((j) => `<tr class="${j.inPowerFab ? '' : 'not-pf'}" data-search="${esc(`${j.job} ${j.description} ${j.location}`.toLowerCase())}">
       <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks, piece codes or a BOM for it, but PowerFab didn’t list it">not in PowerFab</span>'}</td>
       <td>${esc(j.description)}</td><td>${esc(j.location)}</td>
-      <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
+      <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td data-v="${esc(j.lastAt ?? '')}">${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
       ${r.photosEnabled ? `<td class="path">${j.photoError ? `<span class="error">${esc(j.photoError)}</span>` : `${esc(j.photoFolder ?? '')}<br><span class="muted">${j.photoRule === 'default' ? 'default' : `rule ${esc(j.photoRule ?? '')}`}</span>`}</td>` : ''}
     </tr>`).join('')}
     </tbody></table></div>` : '<p class="muted">No jobs.</p>'}
@@ -464,18 +472,18 @@ function filterJobs() {
 }
 
 async function pageJob(job) {
-  const [loads, items] = await Promise.all([api(`/jobs/${enc(job)}/loads`), api(`/activity?job=${enc(job)}&limit=100`)]);
+  const [loads, items] = await Promise.all([api(`/jobs/${enc(job)}/loads`), api(`/activity?job=${enc(job)}&limit=${RECENT}`)]);
   return `<p class="crumbs"><a href="#/jobs">Jobs</a> › ${esc(job)}</p>
-  <div class="grid">
+  <div class="grid wide-left">
     <section class="panel"><h1>Job ${esc(job)}</h1>
       <p class="muted">Loads the iPads have opened. PowerFab itself has the full list.</p>
-      ${loads.length ? `<table><thead><tr><th>Load</th><th class="num">Stacks</th><th class="num">Pieces</th><th class="num">Weight</th><th>Truck check</th><th>Changed</th></tr></thead><tbody>
+      ${loads.length ? `<div class="table-wrap"><table><thead><tr><th>Load</th><th class="num">Stacks</th><th class="num">Pieces</th><th class="num">Weight</th><th>Truck check</th><th>Changed</th></tr></thead><tbody>
       ${loads.map((l) => {
         const t = loadTotals(l);
-        return `<tr><td><a href="#/load/${enc(l.loadId)}"><b>Load ${esc(l.loadNumber)}</b></a></td><td class="num">${l.stacks.length}</td><td class="num">${t.pieces}</td><td class="num">${lbs(t.weight)}</td><td>${checkPill(l)}</td><td>${esc(ago(l.updatedAt))}</td></tr>`;
-      }).join('')}</tbody></table>` : '<p class="muted">No loads yet.</p>'}
+        return `<tr><td><a href="#/load/${enc(l.loadId)}"><b>Load ${esc(l.loadNumber)}</b></a></td><td class="num">${l.stacks.length}</td><td class="num">${t.pieces}</td><td class="num">${lbs(t.weight)}</td><td>${checkPill(l)}</td><td data-v="${esc(l.updatedAt ?? '')}">${esc(ago(l.updatedAt))}</td></tr>`;
+      }).join('')}</tbody></table></div>` : '<p class="muted">No loads yet.</p>'}
     </section>
-    <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
+    <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${recent(items, `job=${enc(job)}`)}</div></section>
   </div>
   ${await bomPanel(job)}
   ${await codesPanel(job)}`;
@@ -564,9 +572,9 @@ async function codesPanel(job) {
       <p><button class="btn primary" type="submit"${off}>Save</button> <span id="codes-saved" class="muted"></span></p>
     </form>
     <h3>Add codes</h3>
-    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status…), or paste one code per line: code, mark, sequence. Importing the same export again later refreshes each piece's status.</p>
+    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status, Description, Weight…), or paste one code per line: code, mark, sequence, description, weight. The description and weight are printed on the piece labels (Labels tab). Importing the same export again later refreshes each piece's status.</p>
     <p><input type="file" id="codes-file" accept=".csv,.txt,.tsv,text/csv,text/plain"${off}></p>
-    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence (sequence is optional). Paste from a spreadsheet works too."${off}></textarea>
+    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence, description, weight (all after the mark optional). Paste from a spreadsheet works too."${off}></textarea>
     <label class="check"><input type="checkbox" id="codes-overwrite"${off}> Move a code already paired with another mark to the mark in this list</label>
     <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
       <button class="btn" type="button" data-codes-clear${off || (r.count ? '' : ' disabled')}>Remove all ${num(r.count)} codes</button></p>
@@ -699,7 +707,7 @@ async function clearCodes(btn) {
 async function pageLoad(loadId, query) {
   const state = await api(`/loads/${enc(loadId)}`);
   const [items, photoList] = await Promise.all([
-    api(`/activity?load=${enc(loadId)}&limit=100`),
+    api(`/activity?load=${enc(loadId)}&limit=${RECENT}`),
     health?.photosEnabled && state.job ? api(`/photos/${enc(state.job)}/${enc(state.loadNumber)}`).then((r) => r.files.map((f) => ({ ...f, job: state.job, load: state.loadNumber }))).catch(() => []) : [],
   ]);
   const t = loadTotals(state);
@@ -716,7 +724,7 @@ async function pageLoad(loadId, query) {
         return `<tr class="${e.pending ? 'pending' : ''}${e.manual ? ' manual' : ''}">
           <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a>${e.code ? `<br><span class="muted code">${esc(e.code)}</span>` : ''}</td><td>${esc(e.sequence)}</td>
           <td>${e.pending ? 'Waiting on PowerFab…' : e.removing ? 'Being taken off…' : esc(e.description ?? '')}${e.manual ? ' <span class="pill warn">typed</span>' : ''}</td>
-          <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td>${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
+          <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td data-v="${esc(e.scannedAt ?? '')}">${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
           ${state.truckCheck ? `<td>${scan ? `✓ ${who(scan.scannedBy, 'solo')}` : ''}</td>` : ''}</tr>`;
       }).join('')}</tbody></table>` : '<p class="muted" style="padding:.5rem .85rem">Empty.</p>'}
     </section>`;
@@ -736,15 +744,15 @@ async function pageLoad(loadId, query) {
       </section>
       ${health?.photosEnabled ? `<section class="panel"><h2>Photos</h2>${await photoGrid(photoList.slice().reverse(), { empty: 'No photos of this load.' })}</section>` : ''}
     </div>
-    <section class="panel"><h2>Activity on this load</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
+    <section class="panel"><h2>Activity on this load</h2><div data-feed>${recent(items, `load=${enc(loadId)}&loadNumber=${enc(state.loadNumber)}`)}</div></section>
   </div>`;
 }
 
 async function pageMark(mark, query) {
   const job = query.get('job') ?? '';
-  const items = await api(`/activity?mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}&limit=100`);
+  const items = await api(`/activity?mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}&limit=${RECENT}`);
   return `<p class="crumbs">${job ? `<a href="#/job/${enc(job)}">${esc(job)}</a> › ` : ''}Piece ${esc(mark)}</p>
-    <section class="panel"><h1 class="mark">${esc(mark)}</h1><h2>Everything done with this mark</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>`;
+    <section class="panel"><h1 class="mark">${esc(mark)}</h1><h2>Everything done with this mark</h2><div data-feed>${recent(items, `mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}`)}</div></section>`;
 }
 
 // Photos: every job with photos › its loads › the photos, read from the photo folders (so photos
@@ -778,7 +786,7 @@ async function pagePhotos([job, load] = [], query = new URLSearchParams()) {
       <section class="panel"><h2>Job ${esc(job)} <span class="muted">· ${r.loads.length} load${r.loads.length === 1 ? '' : 's'} with photos</span></h2>
         <p class="muted path">Stored in ${esc(r.folder ?? '')}</p>
         ${r.loads.length ? `<table><thead><tr><th>Load</th><th class="num">Photos</th><th>Last photo</th><th>Folder</th></tr></thead><tbody>
-          ${r.loads.map((l) => `<tr><td><a href="#/photos/${enc(job)}/${enc(l.load)}"><b>Load ${esc(l.load)}</b></a></td><td class="num">${num(l.photos)}</td><td>${l.lastAt ? esc(ago(l.lastAt)) : ''}</td><td class="path">${esc(l.folder ?? '')}</td></tr>`).join('')}
+          ${r.loads.map((l) => `<tr><td><a href="#/photos/${enc(job)}/${enc(l.load)}"><b>Load ${esc(l.load)}</b></a></td><td class="num">${num(l.photos)}</td><td data-v="${esc(l.lastAt ?? '')}">${l.lastAt ? esc(ago(l.lastAt)) : ''}</td><td class="path">${esc(l.folder ?? '')}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No photos for this job.</p>'}</section>`;
   }
   if (query.get('view') === 'newest') {
@@ -796,7 +804,7 @@ async function pagePhotos([job, load] = [], query = new URLSearchParams()) {
       <p class="muted">Every job with photos in its folder. Pick one, then a load. The iPads have the same explorer (home screen › Photos), look only.</p>
       <input class="filter" type="search" id="photo-job-filter" placeholder="Filter jobs" value="${esc(photoJobFilter)}" autocomplete="off">
       ${r.jobs.length ? `<div style="overflow-x:auto"><table id="photo-jobs-table"><thead><tr><th>Job</th><th>Description</th><th class="num">Loads</th><th class="num">Photos</th><th>Last photo</th><th>Folder</th></tr></thead><tbody>
-        ${r.jobs.map((j) => `<tr data-search="${esc(`${j.job} ${j.description}`.toLowerCase())}"><td><a href="#/photos/${enc(j.job)}"><b>${esc(j.job)}</b></a></td><td>${esc(j.description)}</td><td class="num">${num(j.loads)}</td><td class="num">${num(j.photos)}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td><td class="path">${esc(j.folder ?? '')}</td></tr>`).join('')}
+        ${r.jobs.map((j) => `<tr data-search="${esc(`${j.job} ${j.description}`.toLowerCase())}"><td><a href="#/photos/${enc(j.job)}"><b>${esc(j.job)}</b></a></td><td>${esc(j.description)}</td><td class="num">${num(j.loads)}</td><td class="num">${num(j.photos)}</td><td data-v="${esc(j.lastAt ?? '')}">${j.lastAt ? esc(ago(j.lastAt)) : ''}</td><td class="path">${esc(j.folder ?? '')}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">No photos yet.</p>'}
     </section>
     <section class="panel"><h2>Latest taken <span class="muted">· <a href="#/photos?view=newest">all, newest first ›</a></span></h2>${await photoGrid(recent.photos, { deletable: true })}</section>`;
@@ -1080,10 +1088,10 @@ function speedPanel(pf, scans) {
         <h3>Scans on each device</h3>
         <p class="muted">From the scan on the device to PowerFab having it loaded. “Waited” is time spent behind the scans before it.</p>
         ${devs.length ? `<table><thead><tr><th>Device</th><th class="num">Scans</th><th class="num">Average</th><th class="num">Slowest</th><th class="num">Waited, avg</th><th>Last</th></tr></thead><tbody>
-          ${devs.map((d) => `<tr><td>${esc(d.device)}</td><td class="num">${num(d.scans)}</td><td class="num"${slow(d.averageMs)}>${msText(d.averageMs)}</td><td class="num"${slow(d.slowestMs)}>${msText(d.slowestMs)}</td><td class="num">${msText(d.averageWaitMs)}</td><td>${d.last ? esc(ago(d.last)) : ''}</td></tr>`).join('')}
+          ${devs.map((d) => `<tr><td>${esc(d.device)}</td><td class="num">${num(d.scans)}</td><td class="num"${slow(d.averageMs)}>${msText(d.averageMs)}</td><td class="num"${slow(d.slowestMs)}>${msText(d.slowestMs)}</td><td class="num">${msText(d.averageWaitMs)}</td><td data-v="${esc(d.last ?? '')}">${d.last ? esc(ago(d.last)) : ''}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No scan times yet (devices send them from app v0.26.0).</p>'}
         ${scans.newest?.length ? `<details><summary>Last ${scans.newest.length} scans</summary><table class="small"><thead><tr><th>When</th><th>Device</th><th>Mark</th><th class="num">Total</th><th class="num">Waited</th><th>Steps</th></tr></thead><tbody>
-          ${scans.newest.map((x) => `<tr><td>${x.at ? esc(when(x.at)) : ''}</td><td>${esc(x.device)}</td><td>${esc(x.mark ?? '')}${x.ok === false ? ` <span class="error" title="${esc(x.error ?? '')}">refused</span>` : ''}</td><td class="num"${slow(x.totalMs ?? 0)}>${x.totalMs == null ? '' : msText(x.totalMs)}</td><td class="num">${msText(x.waitMs ?? 0)}${x.ahead ? ` <span class="muted">(${x.ahead} ahead)</span>` : ''}</td><td class="muted">${(x.steps ?? []).map((st) => `${esc(st.name)} ${msText(st.ms)}`).join(' · ')}</td></tr>`).join('')}
+          ${scans.newest.map((x) => `<tr><td data-v="${esc(x.at ?? '')}">${x.at ? esc(when(x.at)) : ''}</td><td>${esc(x.device)}</td><td>${esc(x.mark ?? '')}${x.ok === false ? ` <span class="error" title="${esc(x.error ?? '')}">refused</span>` : ''}</td><td class="num"${slow(x.totalMs ?? 0)}>${x.totalMs == null ? '' : msText(x.totalMs)}</td><td class="num">${msText(x.waitMs ?? 0)}${x.ahead ? ` <span class="muted">(${x.ahead} ahead)</span>` : ''}</td><td class="muted">${(x.steps ?? []).map((st) => `${esc(st.name)} ${msText(st.ms)}`).join(' · ')}</td></tr>`).join('')}
         </tbody></table></details>` : ''}
       </div>
       <div>
@@ -1093,7 +1101,7 @@ function speedPanel(pf, scans) {
           ${pf.commands.map((c) => `<tr><td>${esc(c.command)}${c.errors ? ` <span class="error">${c.errors} failed</span>` : ''}</td><td class="num">${num(c.toPowerFab)}</td><td class="num">${num(c.sharedOrReused)}</td><td class="num"${slow(c.averageMs)}>${msText(c.averageMs)}</td><td class="num"${slow(c.slowestMs)}>${msText(c.slowestMs)}</td><td class="num">${bytes(c.averageBytes)}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No PowerFab calls yet.</p>'}
         ${pf.newest?.length ? `<details><summary>Last ${pf.newest.length} calls</summary><table class="small"><thead><tr><th>When</th><th>Command</th><th>Device</th><th class="num">Time</th><th class="num">Reply</th><th>How</th></tr></thead><tbody>
-          ${pf.newest.map((x) => `<tr><td>${esc(when(x.at))}</td><td>${esc(x.command)}${x.error || x.status >= 400 ? ` <span class="error" title="${esc(x.error ?? '')}">${x.status}</span>` : ''}</td><td>${esc(x.device ?? '')}</td><td class="num"${slow(x.ms)}>${msText(x.ms)}</td><td class="num">${bytes(x.bytes)}</td><td class="muted">${esc(x.how)}${x.waiting ? ` · ${x.waiting} ahead` : ''}</td></tr>`).join('')}
+          ${pf.newest.map((x) => `<tr><td data-v="${esc(x.at ?? '')}">${esc(when(x.at))}</td><td>${esc(x.command)}${x.error || x.status >= 400 ? ` <span class="error" title="${esc(x.error ?? '')}">${x.status}</span>` : ''}</td><td>${esc(x.device ?? '')}</td><td class="num"${slow(x.ms)}>${msText(x.ms)}</td><td class="num">${bytes(x.bytes)}</td><td class="muted">${esc(x.how)}${x.waiting ? ` · ${x.waiting} ahead` : ''}</td></tr>`).join('')}
         </tbody></table></details>` : ''}
       </div>
     </div>
@@ -1143,7 +1151,7 @@ async function pageServer() {
       </section>
       <section class="panel"><h2>iPads, last 7 days</h2>
         ${d.byDevice.length ? `<table><thead><tr><th>iPad</th><th class="num">Scans today</th><th class="num">7 days</th><th>Last scan</th></tr></thead><tbody>
-        ${d.byDevice.map((x) => `<tr><td>${who(x.deviceId, x.deviceName)}</td><td class="num">${num(x.today)}</td><td class="num">${num(x.week)}</td><td>${x.lastAt ? esc(ago(x.lastAt)) : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No scans in the last 7 days.</p>'}
+        ${d.byDevice.map((x) => `<tr><td>${who(x.deviceId, x.deviceName)}</td><td class="num">${num(x.today)}</td><td class="num">${num(x.week)}</td><td data-v="${esc(x.lastAt ?? '')}">${x.lastAt ? esc(ago(x.lastAt)) : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No scans in the last 7 days.</p>'}
       </section>
       <section class="panel"><h2>What happened, last 7 days</h2>
         ${d.kinds.length ? `<table><tbody>${d.kinds.map((k) => `<tr><td><span class="kind ${esc(k.kind)}">${esc(k.kind.replace('-', ' '))}</span></td><td class="num">${num(k.count)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nothing.</p>'}
@@ -1517,7 +1525,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a><a href="#/docs/speed" class="${name === 'speed' ? 'active' : ''}">Scan speed</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a><a href="#/docs/speed" class="${name === 'speed' ? 'active' : ''}">Scan speed</a><a href="#/docs/labels" class="${name === 'labels' ? 'active' : ''}">Labels</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1534,8 +1542,9 @@ async function draw() {
   const arg = decodeURIComponent(rest.join('/'));
   const query = new URLSearchParams(qs ?? '');
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active',
-    a.dataset.nav === (page === '' || page === 'device' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
+    a.dataset.nav === (page === '' || page === 'device' || page === 'history' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
   if (redrawReason === 'nav') newestShown = NEWEST_PAGE; // "Show more" stays through live redraws only
+  if (redrawReason === 'nav') filterState.clear(); // a table's filter box is for the page it was typed on
   grids.clear();
   currentPage = page;
   try {
@@ -1548,6 +1557,8 @@ async function draw() {
       : page === 'mark' ? pageMark(arg, query)
       : page === 'photos' ? pagePhotos(rest.map(decodeURIComponent), query)
       : page === 'docs' ? pageDocs(arg || 'setup')
+      : page === 'history' ? pageHistory(query)
+      : page === 'labels' ? pageLabels(query)
       : pageHome());
     if (seq !== drawing) return;
     const nav = redrawReason === 'nav';
@@ -1562,9 +1573,11 @@ async function draw() {
       restoreScrolls(inner);
     }
     fillPhotos();
+    enhanceTables($('#main'), page);
     if (page === 'jobs') filterJobs();
     if (page === 'photos') filterPhotoJobs();
     if (page === 'settings') refreshUpdates();
+    if (page === 'labels') labelsRefresh();
     const focus = query.get('stack');
     if (focus && redrawReason === 'nav') document.getElementById(`stack-${focus}`)?.scrollIntoView({ block: 'start' });
   } catch (err) {
@@ -1581,7 +1594,7 @@ let currentPage = '';
 // Live changes redraw the page, at most a few times a second. Settings is never redrawn by itself,
 // so nothing being typed there is lost.
 function redrawSoon() {
-  if (currentPage === 'settings' || $('#dlg-pin').open) return;
+  if (currentPage === 'settings' || currentPage === 'labels' || $('#dlg-pin').open) return;
   if (document.querySelector('input:focus') || $('#dlg-photo').open) return;
   clearTimeout(redrawTimer);
   redrawTimer = setTimeout(() => {
@@ -1713,6 +1726,7 @@ function bind() {
     saveDevice(e.target, { name: $('#device-name').value });
   });
   $('#main').addEventListener('change', async (e) => {
+    if (currentPage === 'labels' && await labelsChange(e.target)) return;
     if (e.target.id !== 'codes-file' || !e.target.files?.[0]) return;
     // Reads the export here and puts it in the box, so what will be added can be seen first.
     const file = e.target.files[0];
@@ -1721,9 +1735,21 @@ function bind() {
     const rows = $('#codes-text').value.split('\n').filter((l) => l.trim()).length;
     $('#codes-out').innerHTML = `<p class="muted">${esc(file.name)}: ${num(Math.max(rows - 1, 0))} rows read. Press “Add to the list”.</p>`;
   });
+  // Sortable headings work from the keyboard too.
+  $('#main').addEventListener('keydown', (e) => {
+    const th = e.target.closest?.('table.sortable thead th');
+    if (th && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); sortByHeading(th); }
+  });
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
     if (e.target.id === 'photo-job-filter') { photoJobFilter = e.target.value; filterPhotoJobs(); }
+    labelsInput(e.target);
+    const tf = e.target.closest?.('[data-table-filter]');
+    if (tf) {
+      filterState.set(tf.dataset.tableFilter, tf.value);
+      const table = document.querySelector(`table[data-table-key="${tf.dataset.tableFilter}"]`);
+      if (table) filterTable(table, tf.value);
+    }
   });
   $('#main').addEventListener('click', async (e) => {
     const t = e.target;
@@ -1740,6 +1766,27 @@ function bind() {
       else window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
+    const heading = t.closest('table.sortable thead th');
+    if (heading) { sortByHeading(heading); return; }
+    if (await labelsClick(t)) return;
+    const histMore = t.closest('[data-hist-more]');
+    if (histMore) {
+      histMore.disabled = true;
+      const filter = histMore.dataset.histFilter;
+      try {
+        const older = await api(`/activity?${filter ? `${filter}&` : ''}before=${histMore.dataset.histMore}&limit=${HISTORY_PAGE}`);
+        if (historyOlder.filter !== filter) historyOlder = { filter, items: [], done: false };
+        historyOlder.items.push(...older);
+        historyOlder.done = older.length < HISTORY_PAGE;
+        redrawReason = 'live';
+        draw();
+      } catch (err) {
+        histMore.disabled = false;
+        histMore.textContent = err.message;
+      }
+      return;
+    }
+    if (t.closest('[data-hist-csv]')) { historyCsv(); return; }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
     if (t.closest('[data-slot-preview]')) { previewSlot(); return; }
     if (t.closest('[data-slot-write]')) { writeSlot(t.closest('[data-slot-write]')); return; }
@@ -1899,6 +1946,422 @@ function bind() {
     if (currentPage === 'server' && adminToken() && !document.hidden && !$('#dlg-pin').open && !touching && Date.now() - lastScrollAt > 800) { redrawReason = 'live'; draw(); }
   }, 10000);
   $('#dlg-photo').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+}
+
+// ---- Recent activity: a short list on each page, the rest on the History page ----------------
+
+const RECENT = 10;
+
+// The last few lines of an activity list, and a link to all of it (History page, same filter).
+function recent(items, filter) {
+  return `${feed(items.slice(0, RECENT), { fresh: freshIds })}
+    <p class="more-link"><a href="#/history?${filter}">All history ›</a></p>`;
+}
+
+// The History page: every line of an activity filter as a sortable table, "Show older" adds more.
+function historyRow(a) {
+  const link = (href, text) => (text ? `<a href="${href}">${esc(text)}</a>` : '');
+  return `<tr class="${freshIds.has(a.id) ? 'fresh' : ''}">
+    <td data-v="${esc(a.at)}"><time title="${esc(new Date(a.at).toLocaleString())}">${esc(when(a.at))}</time></td>
+    <td>${who(a.deviceId, a.deviceName)}</td>
+    <td><span class="kind ${esc(a.kind)}">${esc(a.kind.replace('-', ' '))}</span></td>
+    <td class="wrap">${esc(a.text)}</td>
+    <td>${a.job ? link(`#/job/${enc(a.job)}`, `Job ${a.job}`) : ''}</td>
+    <td>${a.loadId ? link(`#/load/${enc(a.loadId)}`, `Load ${a.loadNumber ?? ''}`) : a.loadNumber ? link(`#/job/${enc(a.job ?? '')}`, `Load ${a.loadNumber}`) : ''}</td>
+    <td>${a.stackName && a.loadId ? link(`#/load/${enc(a.loadId)}?stack=${enc(a.stackId ?? '')}`, a.stackName) : ''}</td>
+    <td>${a.mark ? link(`#/mark/${enc(a.mark)}${a.job ? `?job=${enc(a.job)}` : ''}`, a.mark) : ''}</td>
+  </tr>`;
+}
+
+function historyFilter(query) {
+  return ['device', 'job', 'load', 'mark'].filter((k) => query.get(k)).map((k) => `${k}=${enc(query.get(k))}`).join('&');
+}
+
+// Lines already pulled in with "Show older", kept through live redraws of the same History page.
+const HISTORY_PAGE = 200;
+let historyOlder = { filter: null, items: [], done: false };
+
+function historyTitle(query) {
+  const parts = [];
+  if (query.get('device')) parts.push(deviceOf(query.get('device'))?.name ?? 'a removed device');
+  if (query.get('job')) parts.push(`Job ${query.get('job')}`);
+  if (query.get('load')) parts.push(`Load ${query.get('loadNumber') ?? ''}`.trim());
+  if (query.get('mark')) parts.push(query.get('mark'));
+  return parts.join(' · ');
+}
+
+// Where "‹ Back" on the History page goes: the page its "All history" link was on.
+function historyBack(query) {
+  if (query.get('device')) return [`#/device/${enc(query.get('device'))}`, deviceOf(query.get('device'))?.name ?? 'Device'];
+  if (query.get('mark')) return [`#/mark/${enc(query.get('mark'))}${query.get('job') ? `?job=${enc(query.get('job'))}` : ''}`, query.get('mark')];
+  if (query.get('load')) return [`#/load/${enc(query.get('load'))}`, `Load ${query.get('loadNumber') ?? ''}`.trim()];
+  if (query.get('job')) return [`#/job/${enc(query.get('job'))}`, `Job ${query.get('job')}`];
+  return ['#/', 'Devices & activity'];
+}
+
+async function pageHistory(query) {
+  const filter = historyFilter(query);
+  if (historyOlder.filter !== filter) historyOlder = { filter, items: [], done: false };
+  const newest = await api(`/activity?${filter ? `${filter}&` : ''}limit=${HISTORY_PAGE}`);
+  const lowest = newest.length ? newest.at(-1).id : Infinity;
+  const items = [...newest, ...historyOlder.items.filter((a) => a.id < lowest)];
+  const more = !historyOlder.done && (historyOlder.items.length ? true : newest.length >= HISTORY_PAGE);
+  historyShown = items;
+  const title = historyTitle(query);
+  const [backHref, backText] = historyBack(query);
+  return `<p class="crumbs"><a href="${backHref}">‹ ${esc(backText)}</a> › History</p>
+    <section class="panel"><h1>History${title ? ` <span class="muted">· ${esc(title)}</span>` : ''}</h1>
+      <p class="muted">Every change, newest first. Click a column heading to sort, type in the box to narrow it down. ${num(items.length)} line${items.length === 1 ? '' : 's'} shown${more ? ': “Show older” adds the ones before' : ', all there is'}.</p>
+      ${items.length ? `<p class="codes-actions"><button class="btn btn-small" type="button" data-hist-csv>Download as a spreadsheet (CSV)</button></p>
+        <div class="table-wrap sheet"><table id="history-table" class="sheet" data-filter-rows="1"><thead><tr>
+        <th>When</th><th>Who</th><th>Kind</th><th>What</th><th>Job</th><th>Load</th><th>Stack</th><th>Mark</th></tr></thead>
+        <tbody>${items.map(historyRow).join('')}</tbody></table></div>
+        ${more ? `<p><button class="btn more" type="button" data-hist-more="${items.at(-1).id}" data-hist-filter="${esc(filter)}">Show ${HISTORY_PAGE} older</button></p>` : ''}`
+        : '<p class="muted">Nothing yet.</p>'}
+    </section>`;
+}
+
+let historyShown = [];
+
+// The History lines on screen as a CSV file Excel opens.
+function historyCsv() {
+  const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [['When', 'Who', 'Kind', 'What', 'Job', 'Load', 'Stack', 'Mark'],
+    ...historyShown.map((a) => [new Date(a.at).toLocaleString(), deviceOf(a.deviceId)?.name ?? a.deviceName ?? '', a.kind, a.text, a.job, a.loadNumber, a.stackName, a.mark])];
+  const blob = new Blob([`\ufeff${rows.map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `terra-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+// ---- Labels (docs/LABELS.md): job, what to print, the sheet positions, then print -------------
+// The page keeps its state here and redraws itself (live changes don't redraw it, so a half-typed
+// code list or a half-marked sheet is never lost).
+
+const labels = {
+  job: '',
+  mode: 'all', // all | mark | codes
+  mark: '', // "mark|sequence" picked in mark mode
+  pieces: [], // the picked mark's labels (from /jobs/{job}/labels)
+  unticked: new Set(), // codes of the picked mark not to print
+  codesText: '', // codes mode: scanned or pasted, one per line
+  used: new Set(), // positions 1-30 already used on the sheet in the printer (kept on the server)
+  skip: new Set(), // free positions to leave empty this time only
+  tapMeans: 'used', // what a tap on a free position does: used | skip
+  last: null, // the last print: { used: [...] } to save once it printed OK
+  info: null, // /labels/marks of the job
+};
+
+const SHEET = 30;
+
+// The labels in the current pick (a count; codes mode counts distinct lines).
+function labelsCount() {
+  if (labels.mode === 'all') return labels.info?.total ?? 0;
+  if (labels.mode === 'mark') return labels.pieces.filter((p) => !labels.unticked.has(p.code)).length;
+  return labelsCodeList().length;
+}
+
+function labelsCodeList() {
+  const seen = new Set();
+  return labels.codesText.split(/[\s,;]+/).map((c) => c.trim()).filter((c) => c && !seen.has(c.toUpperCase()) && seen.add(c.toUpperCase()));
+}
+
+// The free positions to fill on the sheet in the printer, in order (same rule as Labels.Place).
+function labelsFree() {
+  return Array.from({ length: SHEET }, (_, i) => i + 1).filter((p) => !labels.used.has(p) && !labels.skip.has(p));
+}
+
+// Where `count` labels go: [{ sheet, pos }], first sheet into the free positions, then new sheets.
+function labelsPlace(count) {
+  const out = [];
+  let sheet = 0;
+  let queue = labelsFree();
+  if (!queue.length) queue = Array.from({ length: SHEET }, (_, i) => i + 1);
+  while (out.length < count) {
+    if (!queue.length) { sheet++; queue = Array.from({ length: SHEET }, (_, i) => i + 1); }
+    out.push({ sheet, pos: queue.shift() });
+  }
+  return out;
+}
+
+async function pageLabels(query) {
+  const jobs = await api('/admin/codes');
+  const withCodes = jobs.filter((j) => j.codes > 0).map((j) => j.job);
+  const job = query.get('job') || labels.job || withCodes[0] || '';
+  if (job !== labels.job) Object.assign(labels, { job, mark: '', pieces: [], unticked: new Set(), last: null });
+  if (!job) {
+    return `<section class="panel"><h1>Labels</h1>
+      <p class="muted">No job has piece codes yet. Add them on a job’s page (Piece codes), then come back here.</p></section>`;
+  }
+  const [info, state] = await Promise.all([api(`/admin/jobs/${enc(job)}/labels/marks`), api('/admin/labels/sheet-state')]);
+  labels.info = info;
+  labels.used = new Set(state.used);
+  labels.used.forEach((p) => labels.skip.delete(p));
+  if (labels.mode === 'mark' && labels.mark && !labels.pieces.length) {
+    const [mark, seq] = labels.mark.split('|');
+    labels.pieces = await api(`/admin/jobs/${enc(job)}/labels?mark=${enc(mark)}&seq=${enc(seq)}`);
+  }
+  const jobOptions = (withCodes.includes(job) ? withCodes : [job, ...withCodes])
+    .map((j) => `<option value="${esc(j)}"${j === job ? ' selected' : ''}>${esc(j)}</option>`).join('');
+  const modeBtn = (m, text) => `<button type="button" class="seg${labels.mode === m ? ' on' : ''}" data-labels-mode="${m}" aria-pressed="${labels.mode === m}">${text}</button>`;
+  const missing = [info.missingDescription ? `${num(info.missingDescription)} without a description` : '', info.missingWeight ? `${num(info.missingWeight)} without a weight` : ''].filter(Boolean);
+  return `<section class="panel labels-page">
+      <h1>Labels</h1>
+      <p class="muted">Piece labels on Avery 5160 sheets (30 to a sheet, 3 across, 10 down): the barcode on top, then the mark, sequence, description, qty, weight and job.</p>
+      <div class="label-form">
+        <label>Job <select id="labels-job">${jobOptions}</select></label>
+      </div>
+      <p class="muted">${num(info.total)} piece code${info.total === 1 ? '' : 's'} on job ${esc(job)}, ${num(info.marks.length)} mark${info.marks.length === 1 ? '' : 's'}.${missing.length ? ` <span class="warn-text">${esc(missing.join(', '))}: import the code list again with Description and Weight columns, or upload the job’s BOM.</span>` : ''}</p>
+      <h2>What to print</h2>
+      <div class="segs" role="group" aria-label="What to print">${modeBtn('all', 'Whole job')}${modeBtn('mark', 'One assembly')}${modeBtn('codes', 'Chosen barcodes')}</div>
+      ${labelsPickHtml()}
+      <h2>The sheet in the printer</h2>
+      <p class="muted">Tap the positions already peeled off, so the labels go into the free ones. The server remembers the sheet between prints.</p>
+      <div class="segs small" role="group" aria-label="A tap on a free position">
+        <span class="muted">A tap marks a position</span>
+        <button type="button" class="seg${labels.tapMeans === 'used' ? ' on' : ''}" data-labels-tap="used">Used</button>
+        <button type="button" class="seg${labels.tapMeans === 'skip' ? ' on' : ''}" data-labels-tap="skip">Leave empty this time</button>
+      </div>
+      <div class="sheet-picker" id="sheet-picker" aria-label="Label positions, row by row"></div>
+      <p class="legend muted"><span class="slot-key print"></span> gets a label <span class="slot-key free"></span> free <span class="slot-key used"></span> used <span class="slot-key skip"></span> left empty</p>
+      <p class="muted" id="labels-summary"></p>
+      <p class="codes-actions">
+        <button class="btn primary" type="button" data-labels-print>Print</button>
+        <button class="btn" type="button" data-labels-new-sheet>New sheet (all free)</button>
+      </p>
+      <div id="labels-out">${labels.last ? labelsAfterPrintHtml() : ''}</div>
+    </section>`;
+}
+
+function labelsPickHtml() {
+  if (labels.mode === 'all') return `<p>Every piece code of the job, by mark and sequence.</p>`;
+  if (labels.mode === 'codes') {
+    return `<div class="field"><label for="labels-codes">Scan or paste the barcodes to reprint, one per line</label>
+      <textarea id="labels-codes" rows="6" spellcheck="false" autocomplete="off" placeholder="C9227621Q1">${esc(labels.codesText)}</textarea></div>`;
+  }
+  const opts = labels.info.marks.map((m) => {
+    const v = `${m.mark}|${m.sequence}`;
+    return `<option value="${esc(v)}"${v === labels.mark ? ' selected' : ''}>${esc(m.mark)} · seq ${esc(m.sequence || '—')} · ${num(m.count)} pc${m.count === 1 ? '' : 's'}</option>`;
+  }).join('');
+  const rows = labels.pieces.map((p) => `<tr>
+      <td><label class="check"><input type="checkbox" data-labels-piece="${esc(p.code)}"${labels.unticked.has(p.code) ? '' : ' checked'}> <code>${esc(p.code)}</code></label></td>
+      <td class="num" data-v="${p.index}">${p.index} of ${p.of}</td>
+      <td class="wrap">${esc(p.description ?? '')}</td>
+      <td class="num" data-v="${p.weight ?? ''}">${p.weight == null ? '' : lbs(p.weight)}</td></tr>`).join('');
+  return `<div class="label-form"><label>Assembly (mark) <select id="labels-mark"><option value="">Pick one…</option>${opts}</select></label></div>
+    ${labels.pieces.length ? `<p class="codes-actions"><button class="btn" type="button" data-labels-tick="all">Tick all</button> <button class="btn" type="button" data-labels-tick="none">Tick none</button></p>
+    <div class="table-wrap"><table class="small"><thead><tr><th>Barcode</th><th>Qty</th><th>Description</th><th>Weight</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+}
+
+// Redraws the sheet grid, the summary and the Print button in place (no page redraw).
+function labelsRefresh() {
+  const grid = $('#sheet-picker');
+  if (!grid) return;
+  const count = labelsCount();
+  const spots = labelsPlace(count);
+  const onFirst = new Map(spots.filter((s) => s.sheet === 0).map((s, i) => [s.pos, i + 1]));
+  grid.innerHTML = Array.from({ length: SHEET }, (_, i) => i + 1).map((p) => {
+    const cls = labels.used.has(p) ? 'used' : labels.skip.has(p) ? 'skip' : onFirst.has(p) ? 'print' : 'free';
+    const text = cls === 'print' ? `#${onFirst.get(p)}` : cls === 'used' ? 'used' : cls === 'skip' ? 'empty' : p;
+    return `<button type="button" class="slot ${cls}" data-pos="${p}" title="Position ${p}">${text}</button>`;
+  }).join('');
+  const sheets = spots.length ? spots.at(-1).sheet + 1 : 0;
+  const free = labelsFree().length;
+  $('#labels-summary').textContent = count
+    ? `${num(count)} label${count === 1 ? '' : 's'}: ${Math.min(count, free || SHEET)} on this sheet${sheets > 1 ? `, then ${num(sheets - 1)} new sheet${sheets === 2 ? '' : 's'}` : ''}. ${free} free position${free === 1 ? '' : 's'} on this sheet.`
+    : labels.mode === 'mark' && !labels.mark ? 'Pick an assembly.' : 'Nothing picked to print.';
+  const btn = $('[data-labels-print]');
+  btn.disabled = !count;
+  btn.textContent = count ? `Print ${num(count)} label${count === 1 ? '' : 's'}` : 'Print';
+}
+
+function labelsAfterPrintHtml() {
+  return `<div class="notice"><p>The sheet opened in a new tab. Print it at <b>100 %</b> (no fit to page, margins none).</p>
+    <p>Printed OK? Then the positions it used are marked used for next time.
+    <button class="btn primary" type="button" data-labels-printed>Yes, it printed</button>
+    <button class="btn" type="button" data-labels-forget>No</button></p></div>`;
+}
+
+async function printLabels(btn) {
+  const count = labelsCount();
+  if (!count) return;
+  const positions = labelsFree();
+  const body = { positions };
+  if (labels.mode === 'mark') {
+    const [mark, seq] = labels.mark.split('|');
+    if (labels.unticked.size) body.codes = labels.pieces.filter((p) => !labels.unticked.has(p.code)).map((p) => p.code);
+    else Object.assign(body, { mark, seq });
+  } else if (labels.mode === 'codes') body.codes = labelsCodeList();
+  const out = $('#labels-out');
+  // Opened now, while the tap still counts, so the browser doesn't block it; filled in below.
+  const tab = window.open('', '_blank');
+  btn.disabled = true;
+  out.innerHTML = '<p class="muted">Making the sheet…</p>';
+  try {
+    const html = await api(`/admin/jobs/${enc(labels.job)}/labels/sheet`, { method: 'POST', body });
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    if (tab) tab.location.href = url;
+    else if (!window.open(url, '_blank')) throw new Error('The browser blocked the new tab. Allow pop-ups for this site, then press Print again.');
+    // What the sheet in the printer looks like after this print (the last sheet it used).
+    const spots = labelsPlace(count);
+    const lastSheet = spots.at(-1).sheet;
+    const onLast = spots.filter((s) => s.sheet === lastSheet).map((s) => s.pos);
+    labels.last = { used: lastSheet === 0 ? [...labels.used, ...onLast] : onLast };
+    out.innerHTML = labelsAfterPrintHtml();
+  } catch (err) {
+    tab?.close();
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function saveLabelSheet(used) {
+  const saved = await api('/admin/labels/sheet-state', { method: 'PUT', body: { used } });
+  labels.used = new Set(saved.used);
+  labels.skip = new Set();
+  labels.last = null;
+  $('#labels-out').innerHTML = '';
+  labelsRefresh();
+}
+
+// Clicks, changes and typing on the Labels page. True when the event was one of its own.
+async function labelsClick(t) {
+  if (currentPage !== 'labels') return false;
+  const mode = t.closest('[data-labels-mode]');
+  if (mode) { labels.mode = mode.dataset.labelsMode; redrawReason = 'live'; draw(); return true; }
+  const tap = t.closest('[data-labels-tap]');
+  if (tap) {
+    labels.tapMeans = tap.dataset.labelsTap;
+    document.querySelectorAll('[data-labels-tap]').forEach((b) => b.classList.toggle('on', b === tap));
+    return true;
+  }
+  const slot = t.closest('#sheet-picker [data-pos]');
+  if (slot) {
+    const p = Number(slot.dataset.pos);
+    if (labels.used.has(p)) {
+      labels.used.delete(p);
+      await saveLabelSheet([...labels.used]);
+    } else if (labels.skip.has(p)) labels.skip.delete(p);
+    else if (labels.tapMeans === 'skip') labels.skip.add(p);
+    else await saveLabelSheet([...labels.used, p]);
+    labelsRefresh();
+    return true;
+  }
+  const tick = t.closest('[data-labels-tick]');
+  if (tick) {
+    labels.unticked = tick.dataset.labelsTick === 'all' ? new Set() : new Set(labels.pieces.map((p) => p.code));
+    document.querySelectorAll('[data-labels-piece]').forEach((c) => { c.checked = !labels.unticked.has(c.dataset.labelsPiece); });
+    labelsRefresh();
+    return true;
+  }
+  if (t.closest('[data-labels-print]')) { printLabels(t.closest('[data-labels-print]')); return true; }
+  if (t.closest('[data-labels-new-sheet]')) { await saveLabelSheet([]); return true; }
+  if (t.closest('[data-labels-printed]')) { await saveLabelSheet(labels.last?.used ?? [...labels.used]); return true; }
+  if (t.closest('[data-labels-forget]')) { labels.last = null; $('#labels-out').innerHTML = ''; return true; }
+  return false;
+}
+
+async function labelsChange(el) {
+  if (el.id === 'labels-job') { location.hash = `#/labels?job=${enc(el.value)}`; return true; }
+  if (el.id === 'labels-mark') {
+    labels.mark = el.value;
+    labels.pieces = [];
+    labels.unticked = new Set();
+    redrawReason = 'live';
+    draw();
+    return true;
+  }
+  if (el.matches('[data-labels-piece]')) {
+    if (el.checked) labels.unticked.delete(el.dataset.labelsPiece); else labels.unticked.add(el.dataset.labelsPiece);
+    labelsRefresh();
+    return true;
+  }
+  return false;
+}
+
+function labelsInput(el) {
+  if (el.id !== 'labels-codes') return false;
+  labels.codesText = el.value;
+  labelsRefresh();
+  return true;
+}
+
+// ---- Sortable tables: every table on the board; a click on a heading sorts it ------------------
+
+const sortState = new Map(); // "page:table index" -> { col, dir }
+
+function sortTable(table, col, dir) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const text = (r) => r.cells[col]?.dataset.v ?? r.cells[col]?.textContent.trim() ?? '';
+  const number = (s) => (/^[-−]?\d[\d,]*(\.\d+)?/.test(s) ? parseFloat(s.replace(/,/g, '').replace('−', '-')) : null);
+  const rows = [...tbody.rows].filter((r) => r.cells.length > col);
+  const numeric = rows.every((r) => text(r) === '' || number(text(r)) !== null);
+  rows.sort((a, b) => {
+    const x = text(a);
+    const y = text(b);
+    if (x === '' || y === '') return x === '' ? (y === '' ? 0 : 1) : -1; // blanks always last
+    return dir * (numeric ? number(x) - number(y) : x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }));
+  });
+  rows.forEach((r) => tbody.appendChild(r));
+  table.querySelectorAll('thead th').forEach((th, i) => {
+    th.setAttribute('aria-sort', i === col ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+  });
+}
+
+// Marks every table in the page as sortable, and sorts it the way it was last sorted. A long table
+// (or one that asks with data-filter-rows) also gets a box above it that hides the rows not matching
+// what's typed; the jobs tables have their own box.
+const FILTER_ROWS = 10;
+const filterState = new Map(); // "page:table index" -> text typed
+
+function enhanceTables(root, page) {
+  root.querySelectorAll('table').forEach((table, i) => {
+    if (!table.tHead || !table.tBodies[0]?.rows.length) return;
+    const key = `${page}:${i}`;
+    table.classList.add('sortable');
+    table.dataset.tableKey = key;
+    const state = sortState.get(key);
+    table.querySelectorAll('thead th').forEach((th, c) => {
+      th.tabIndex = 0;
+      th.title = 'Sort by this column';
+      th.setAttribute('aria-sort', state?.col === c ? (state.dir === 1 ? 'ascending' : 'descending') : 'none');
+    });
+    if (state) sortTable(table, state.col, state.dir);
+    const ownFilter = table.id === 'jobs-table' || table.id === 'photo-jobs-table';
+    if (ownFilter || (!table.dataset.filterRows && table.tBodies[0].rows.length < FILTER_ROWS)) return;
+    let box = root.querySelector(`[data-table-filter="${key}"]`);
+    if (!box) {
+      const anchor = table.parentElement.matches('.table-wrap, div[style*="overflow"]') ? table.parentElement : table;
+      anchor.insertAdjacentHTML('beforebegin', `<input class="filter table-filter" type="search" data-table-filter="${key}" placeholder="Filter these ${num(table.tBodies[0].rows.length)} rows" autocomplete="off" spellcheck="false">`);
+      box = root.querySelector(`[data-table-filter="${key}"]`);
+      box.value = filterState.get(key) ?? '';
+    }
+    filterTable(table, box.value);
+  });
+}
+
+function filterTable(table, text) {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  for (const tr of table.tBodies[0].rows) {
+    const hay = tr.textContent.toLowerCase();
+    tr.hidden = !words.every((w) => hay.includes(w));
+    if (!tr.hidden) shown++;
+  }
+  table.dataset.shown = shown;
+}
+
+function sortByHeading(th) {
+  const table = th.closest('table');
+  const col = [...th.parentElement.children].indexOf(th);
+  const prev = sortState.get(table.dataset.tableKey);
+  const dir = prev?.col === col ? -prev.dir : 1;
+  sortState.set(table.dataset.tableKey, { col, dir });
+  sortTable(table, col, dir);
 }
 
 async function start() {

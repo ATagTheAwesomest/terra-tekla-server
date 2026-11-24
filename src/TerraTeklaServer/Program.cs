@@ -794,6 +794,9 @@ admin.MapDelete("/jobs/{job}/codes/powerfab", async (string job, IHttpClientFact
     return Results.Json(new { cleared, failed }, Json.Options);
 });
 
+// Piece labels for the admin board's Labels tab (Labels.cs, LabelsApi.cs, docs/LABELS.md).
+LabelsApi.Map(admin, store);
+
 admin.MapGet("/boms", () => store.BomJobs().Select(j => new { job = j.Job, info = j.Info }));
 
 // Puts a BOM in the job's slot: the file itself as the body (an .xlsx or a CSV), its name in
@@ -1423,6 +1426,7 @@ static string? Doc(string name)
         "codes" => "docs.PIECE-CODES.md",
         "bom" => "docs.JOB-BOM.md",
         "speed" => "docs.SPEED.md",
+        "labels" => "docs.LABELS.md",
         _ => null,
     };
     if (resource is null)

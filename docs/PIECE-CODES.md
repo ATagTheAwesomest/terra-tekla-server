@@ -32,9 +32,10 @@ The admin board's **Add codes** takes a file (or a paste) of either kind:
 
 - **An export with a first line naming its columns**, like the facility portal's
   `Status, Sequence, Assembly, Barcode, Description, ...`. The code column (Barcode, Code, Serial,
-  Tag, ...) and the mark column (Assembly, Mark, Main Mk, ...) are found by name; Sequence and
-  Status are kept when there; other columns are ignored. Values in double quotes may hold commas.
-- **A plain list**, one `code, mark[, sequence]` per line.
+  Tag, ...) and the mark column (Assembly, Mark, Main Mk, ...) are found by name; Sequence,
+  Status, Description and Weight (lbs) are kept when there (the last two are printed on piece
+  labels, see LABELS.md); other columns are ignored. Values in double quotes may hold commas.
+- **A plain list**, one `code, mark[, sequence[, description, weight]]` per line.
 
 Importing the same export again later refreshes it: each piece's status and sequence are updated,
 codes already there are left as they are, and new ones are added (tick "Move a code..." to also move

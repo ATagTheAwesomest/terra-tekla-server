@@ -9,7 +9,7 @@ namespace TerraTeklaServer;
 // list is scanned, then its piece's mark). See docs/PIECE-CODES.md.
 
 /// <summary>One piece code of a job.</summary>
-public sealed record PieceCode(long Id, string Code, string Mark, string? Sequence, string Source, string AddedAt, string? AddedBy, string? Status = null);
+public sealed record PieceCode(long Id, string Code, string Mark, string? Sequence, string Source, string AddedAt, string? AddedBy, string? Status = null, string? Description = null, double? Weight = null);
 
 /// <summary>
 /// One piece of a job, by its code, and where it is (Store.PiecesOfJob). <c>LoadId</c> null: on no load.
@@ -57,10 +57,9 @@ public sealed record CodesAdded(int Added, int Updated, int Unchanged, List<Code
 /// <summary>A code already paired with another mark.</summary>
 public sealed record CodeConflict(string Code, string Mark, string Wanted);
 
-/// <summary>One line of a pasted or imported code list.</summary>
 /// <summary>One line of a pasted or imported code list. <c>Status</c> is the piece's status in the list
 /// it came from (for example "Fabrication Complete"), shown when it is scanned; null keeps the one on file.</summary>
-public sealed record CodeLine(string Code, string Mark, string? Sequence, string? Status = null);
+public sealed record CodeLine(string Code, string Mark, string? Sequence, string? Status = null, string? Description = null, double? Weight = null);
 
 public static class CodeList
 {
@@ -69,21 +68,24 @@ public static class CodeList
     static readonly string[] MarkColumns = ["assembly", "assemblymark", "mainmk", "mainmark", "mark", "piecemk", "piecemark"];
     static readonly string[] SequenceColumns = ["sequence", "seq"];
     static readonly string[] StatusColumns = ["status"];
+    static readonly string[] DescriptionColumns = ["description", "desc"];
+    static readonly string[] WeightColumns = ["weightlbs", "weight"];
 
     /// <summary>
     /// Reads a code list. Either an export with a first line naming its columns (for example the
-    /// facility portal's "Status, Sequence, Assembly, Barcode, ..."): the code, mark, sequence and
-    /// status columns are found by name and the rest is ignored. Or a plain list, one code per line,
-    /// "code, mark" or "code, mark, sequence". Commas, tabs or semicolons separate values (a
-    /// spreadsheet copy works); a value in double quotes may hold any of them. Blank lines are
-    /// skipped. Returns the lines read and what was wrong with the others.
+    /// facility portal's "Status, Sequence, Assembly, Barcode, ..."): the code, mark, sequence,
+    /// status, description and weight (lbs) columns are found by name and the rest is ignored. Or a
+    /// plain list, one code per line, "code, mark", "code, mark, sequence" or
+    /// "code, mark, sequence, description, weight". The description and weight are printed on labels.
+    /// Commas, tabs or semicolons separate values (a spreadsheet copy works); a value in double
+    /// quotes may hold any of them. Blank lines are skipped. Returns the lines read and what was wrong with the others.
     /// </summary>
     public static (List<CodeLine> Lines, List<string> Errors) Parse(string text)
     {
         var lines = new List<CodeLine>();
         var errors = new List<string>();
         var rows = (text ?? "").TrimStart('\uFEFF').Split('\n');
-        int code = 0, mark = 1, seq = 2, status = -1;
+        int code = 0, mark = 1, seq = 2, status = -1, desc = 3, weight = 4;
         var n = 0;
         var first = true;
         foreach (var raw in rows)
@@ -104,6 +106,7 @@ public static class CodeList
                 if (c >= 0 && m >= 0)
                 {
                     (code, mark, seq, status) = (c, m, Find(SequenceColumns), Find(StatusColumns));
+                    (desc, weight) = (Find(DescriptionColumns), Find(WeightColumns));
                     continue;
                 }
                 if (c >= 0 || m >= 0)
@@ -113,7 +116,7 @@ public static class CodeList
                 }
             }
             string At(int i) => i >= 0 && i < parts.Length ? parts[i] : "";
-            var (cv, mv, sv, st) = (At(code), At(mark), At(seq), At(status));
+            var (cv, mv, sv, st, dv, wv) = (At(code), At(mark), At(seq), At(status), At(desc), At(weight));
             if (cv == "" || mv == "")
             {
                 errors.Add($"Line {n}: needs a code and a mark (\"{Short(line.Trim())}\").");
@@ -124,7 +127,8 @@ public static class CodeList
                 errors.Add($"Line {n}: too long.");
                 continue;
             }
-            lines.Add(new CodeLine(cv, CleanMark(mv), sv == "" ? null : sv, st == "" ? null : st));
+            var w = double.TryParse(wv.Replace("lbs", "", StringComparison.OrdinalIgnoreCase).Replace("lb", "", StringComparison.OrdinalIgnoreCase).Trim(' ', '#'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lbs) ? lbs : (double?)null;
+            lines.Add(new CodeLine(cv, CleanMark(mv), sv == "" ? null : sv, st == "" ? null : st, dv == "" ? null : Short(dv, 120), w));
         }
         return (lines, errors);
     }
@@ -204,4 +208,5 @@ public static class CodeList
     public static string CleanMark(string mark) => mark.Trim().ToUpperInvariant().TrimEnd('-');
 
     static string Short(string s) => s.Length > 40 ? s[..40] + "…" : s;
+    static string Short(string s, int max) => s.Length > max ? s[..max] : s;
 }
