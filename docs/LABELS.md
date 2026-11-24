@@ -14,6 +14,10 @@ The server makes the labels itself from what it has on file, so PowerFab isn't n
  QTY 1 of 12   351 lbs   JOB 26418
 ```
 
+Everything below the barcode fills the label to its bottom edge in bold. Each line is sized to
+the biggest text that fits, so short marks and numbers print large and a long description
+shrinks to fit (cut with "…" only below 5 pt) instead of running off the label.
+
 - **QTY n of N**: this piece among all the codes of its mark and sequence. A reprint of one piece
   still says which of how many it is.
 - **Description and weight** come from the code list: import it with `Description` and
