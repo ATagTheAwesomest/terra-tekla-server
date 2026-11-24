@@ -52,7 +52,8 @@ the iPads or handhelds for now: an export isn't live, so it would go stale. It n
 
 - **Loading**: scanning a code loads one piece of its mark, exactly as scanning the mark does, and the
   row keeps the code. If the list gives a sequence, that sequence is taken first. A code can be on one
-  load only: scanning it again, here or on another load, is refused with where it is.
+  load only. Scanning it again on the same load does nothing (no error, no second row), so scan
+  away; scanning it on another load is refused with where it is.
   Scanning a plain mark on a code job still works; the row just has no code.
 - **New code** (pairing on): the app asks for the piece's mark; scan the mark tag (or type it) and the
   piece loads. Cancel, or scan something else, to drop it.
@@ -61,7 +62,7 @@ the iPads or handhelds for now: an export isn't live, so it would go stale. It n
   sticker is paired with it on the server. After that the sticker scans like any listed code (no
   + Code needed), and it truck checks that one piece. The code pattern doesn't apply to + Code.
 - **Truck check**: a code ticks off the row that was loaded with that code. A code whose row was
-  loaded by mark ticks off a row of its mark that has no code. The same code twice is refused. Each
+  loaded by mark ticks off a row of its mark that has no code. The same code again changes nothing. Each
   mark shows how many of its pieces are checked (`1001-C1 12/40`).
 
 ## Writing codes into PowerFab
@@ -103,6 +104,7 @@ Check before using it:
 | GET | `/api/jobs/{job}/codes?since=` | `{ job, settings: { enabled, pattern, learn }, count, codes: [{ id, code, mark, sequence, source }], last }`. Codes with an id above `since` (0: all); `last` is the next `since`. The app keeps a copy and asks for what is new. |
 | GET | `/api/jobs/{job}/codes/{code}` | `{ code, mark, sequence, source, load: { loadId, loadNumber } }` (`load` null when no row has it). 404 if the job has no such code anywhere. |
 | POST | `/api/jobs/{job}/codes` | Pairs a code from an iPad: `{ code, mark, sequence? }`. 403 unless the job's codes are on and set to pair; 409 when the code is already paired with another mark. |
+| GET | `/api/jobs/{job}/pieces?mark=` | Every piece of the job by its code, and where it is: `{ job, count, loaded, pieces: [{ code, mark, sequence, listed, load: { loadId, loadNumber, stack }, scannedAt, scannedBy, pending, checked }] }`. `load` null: the piece is on no load. `pending`: still going to PowerFab. `checked`: a truck check of that load ticked it off. `listed` false: a row was loaded with a code the list doesn't have. `mark` narrows it to one mark. |
 | GET | `/api/admin/codes` | Jobs with code settings or codes: `[{ job, settings, codes }]` (admin code). |
 | PUT | `/api/admin/jobs/{job}/codes/settings` | `{ enabled, pattern, learn }`. 400 if the pattern isn't a valid regex. |
 | POST | `/api/admin/jobs/{job}/codes/import` | `{ text, overwrite }`. Answers `{ read, added, updated, unchanged, conflicts, conflictCount, errors, errorCount }`. |
@@ -111,8 +113,8 @@ Check before using it:
 | POST | `/api/admin/jobs/{job}/codes/powerfab` | `{ expected }` (the preview's `writeCount`; 409 when it changed). Answers `{ written, failed: [{ code, mark, sequence, instance, error }], stopped, left }`. |
 | DELETE | `/api/admin/jobs/{job}/codes/powerfab` | Clears the instance location of the pieces written. `{ cleared, failed }`. |
 
-Operations carry the code: `beginScan` takes `code` (with one `entryId`) and refuses a code already on
-this or another load of the job; `addCheck` takes `code` (a repeat of a code already checked changes
+Operations carry the code: `beginScan` takes `code` (with one `entryId`): a code already on this load
+changes nothing (not an error), and one on another load of the job is refused; `addCheck` takes `code` (a repeat of a code already checked changes
 nothing). Rows and check scans have `code` in the load state when they have one.
 
 Live messages: `codes` `{ job, codes }` (codes added), `codes-settings` `{ job, settings }`,

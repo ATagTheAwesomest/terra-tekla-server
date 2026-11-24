@@ -12,6 +12,13 @@ namespace TerraTeklaServer;
 public sealed record PieceCode(long Id, string Code, string Mark, string? Sequence, string Source, string AddedAt, string? AddedBy, string? Status = null, string? Description = null, double? Weight = null);
 
 /// <summary>
+/// One piece of a job, by its code, and where it is (Store.PiecesOfJob). <c>LoadId</c> null: on no load.
+/// <c>Listed</c>: on the job's code list (false: only a loaded row has it). <c>Pending</c>: still going to PowerFab.
+/// </summary>
+public sealed record PieceWhere(string Code, string Mark, string? Sequence, bool Listed, string? LoadId, string? LoadNumber,
+    string? StackName, string? ScannedAt, string? ScannedBy, string? DeviceName, bool Pending, bool Checked);
+
+/// <summary>
 /// A job's piece code settings. <c>Pattern</c> is a regex that tells a code the app hasn't seen
 /// apart from a mark (a code it has is always a code); a named group <c>code</c> picks the code out
 /// of a longer scan (a QR code holding a link, say). <c>Learn</c>: a code not on the list is paired on
