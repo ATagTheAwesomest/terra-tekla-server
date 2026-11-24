@@ -183,8 +183,8 @@ public static class LoadOps
     /// on every iPad as "loading" straight away. finishScan or failScan follows.
     /// </summary>
     /// A pallet sends every piece's row at once, in <c>entryIds</c>. A scan of a piece code (jobs with
-    /// piece codes) sends <c>code</c> with its one <c>entryId</c>: a code is one piece, so it is refused
-    /// when a row on this load or any other load of the job already has it.
+    /// piece codes) sends <c>code</c> with its one <c>entryId</c>: a code is one piece, so the same code
+    /// again on this load changes nothing, and one already on another load of the job is refused.
     static bool BeginScan(LoadState s, JsonObject op, OpContext ctx)
     {
         var ids = EntryIds(op);
@@ -196,8 +196,9 @@ public static class LoadOps
                 throw new OpException("A piece code is one piece: send it with one entryId.");
             if (FindEntry(s, ids[0]) is null)
             {
-                if (FindCode(s, code) is { } here)
-                    throw new OpException($"Code {code} is already on this load ({here.Entry.Mark} in {here.Stack.Name}).");
+                // Scanning a piece's code again on the same load changes nothing (scan away): a code is one piece.
+                if (FindCode(s, code) is not null)
+                    return false;
                 if (ctx.CodeElsewhere?.Invoke(code) is { } other)
                     throw new OpException($"Code {code} is already on load {other}.");
             }

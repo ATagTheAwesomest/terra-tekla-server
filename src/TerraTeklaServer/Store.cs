@@ -742,6 +742,36 @@ public sealed class Store
             """, r => (r.GetString(0), r.GetString(1), r.GetString(2)), ("$code", code.Trim()), ("$job", job)).Select(x => ((string, string, string)?)x).FirstOrDefault();
     }
 
+    /// <summary>
+    /// Every piece code of a job, one per piece, with where that piece is: the load and stack whose row
+    /// has it, when and by which device it was scanned, whether PowerFab has confirmed it (not still
+    /// sending), and whether a truck check of that load ticked it off. A code on no load is a piece not
+    /// loaded. Rows loaded with a code the list doesn't have are included too (<c>Listed</c> false).
+    /// </summary>
+    public List<PieceWhere> PiecesOfJob(string job)
+    {
+        using var db = Open();
+        return Rows(db, """
+            WITH rows AS (
+                SELECT e.code, e.mark AS row_mark, e.sequence AS row_seq, e.load_id, l.load_number, s.name AS stack_name,
+                       e.scanned_at, e.scanned_by, d.name AS device_name, e.pending,
+                       EXISTS (SELECT 1 FROM check_scans c WHERE c.load_id = e.load_id AND c.code = e.code COLLATE NOCASE) AS checked,
+                       ROW_NUMBER() OVER (PARTITION BY upper(e.code) ORDER BY e.added_at) AS n
+                FROM entries e JOIN loads l ON l.load_id = e.load_id
+                LEFT JOIN stacks s ON s.load_id = e.load_id AND s.id = e.stack_id
+                LEFT JOIN devices d ON d.id = e.scanned_by
+                WHERE e.code IS NOT NULL AND l.job = $job COLLATE NOCASE)
+            SELECT p.code, p.mark, p.sequence, 1, r.load_id, r.load_number, r.stack_name, r.scanned_at, r.scanned_by, r.device_name, r.pending, r.checked
+            FROM piece_codes p LEFT JOIN rows r ON upper(r.code) = upper(p.code) AND r.n = 1
+            WHERE p.job = $job
+            UNION ALL
+            SELECT r.code, r.row_mark, NULLIF(r.row_seq, ''), 0, r.load_id, r.load_number, r.stack_name, r.scanned_at, r.scanned_by, r.device_name, r.pending, r.checked
+            FROM rows r WHERE r.n = 1 AND NOT EXISTS (SELECT 1 FROM piece_codes p WHERE p.job = $job AND upper(p.code) = upper(r.code))
+            ORDER BY 2, 1
+            """, r => new PieceWhere(r.GetString(0), r.GetString(1), N(r, 2), r.GetInt64(3) != 0, N(r, 4), N(r, 5), N(r, 6), N(r, 7), N(r, 8), N(r, 9),
+                !r.IsDBNull(10) && r.GetInt64(10) != 0, !r.IsDBNull(11) && r.GetInt64(11) != 0), ("$job", job));
+    }
+
     // ---- Devices -----------------------------------------------------------------------
 
     /// <summary>

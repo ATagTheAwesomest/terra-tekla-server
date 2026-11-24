@@ -129,7 +129,7 @@ app.MapGet("/health", () => new { status = "ok", version });
 
 // ---- Live connection --------------------------------------------------------------------------
 
-// Opens with {"type":"hello","key":"...","deviceId":"...","kind":"ipad"|"admin","version":"0.13.0"}.
+// Opens with {"type":"hello","key":"...","deviceId":"...","kind":"ipad"|"admin","version":"0.13.1"}.
 app.Map("/ws", async (HttpContext http) =>
 {
     if (!http.WebSockets.IsWebSocketRequest)
@@ -436,6 +436,26 @@ api.MapGet("/jobs/{job}/codes", (string job, long? since) =>
 {
     var codes = store.Codes(job, since ?? 0);
     return Results.Json(new { job, settings = store.CodeSettings(job), count = store.CodeCount(job), codes = codes.Select(CodeView), last = codes.Count > 0 ? codes[^1].Id : since ?? 0 }, Json.Options);
+});
+
+// Every piece of a job by its code, and where each is: load, stack, who scanned it and when, truck
+// checked or not. A piece with no load isn't loaded. ?mark= narrows it to one mark.
+api.MapGet("/jobs/{job}/pieces", (string job, string? mark) =>
+{
+    var key = mark is null ? null : CodeList.CleanMark(mark);
+    var pieces = store.PiecesOfJob(job).Where(p => key is null || string.Equals(CodeList.CleanMark(p.Mark), key, StringComparison.OrdinalIgnoreCase)).ToList();
+    return Results.Json(new
+    {
+        job,
+        count = pieces.Count,
+        loaded = pieces.Count(p => p.LoadId is not null && !p.Pending),
+        pieces = pieces.Select(p => new
+        {
+            code = p.Code, mark = p.Mark, sequence = p.Sequence, listed = p.Listed,
+            load = p.LoadId is null ? null : new { loadId = p.LoadId, loadNumber = p.LoadNumber, stack = p.StackName },
+            scannedAt = p.ScannedAt, scannedBy = p.DeviceName ?? p.ScannedBy, pending = p.Pending, @checked = p.Checked,
+        }),
+    }, Json.Options);
 });
 
 // One code: its mark, and the load it is on (if a row has it).
