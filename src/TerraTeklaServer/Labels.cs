@@ -139,21 +139,25 @@ public static class Labels
                 var row = slot / 3;
                 sb.Append($"<div class=\"lab\" data-pos=\"{slot + 1}\" style=\"left:{Inch(0.1875 + col * 2.75)};top:{Inch(0.5 + row * 1.0)}\">");
                 sb.Append(BarcodeSvg(l.Code));
-                sb.Append($"<div class=\"val\">{Esc(l.Code)}</div>");
-                sb.Append($"<div class=\"mk\"><b>{Esc(l.Mark)}</b><span>SEQ {Esc(l.Sequence == "" ? "—" : l.Sequence)}</span></div>");
-                sb.Append($"<div class=\"desc\">{Esc(l.Description ?? "")}</div>");
+                sb.Append($"<div class=\"val fit\"><span>{Esc(l.Code)}</span></div>");
+                sb.Append($"<div class=\"mk fit\"><b>{Esc(l.Mark)}</b><span>SEQ {Esc(l.Sequence == "" ? "—" : l.Sequence)}</span></div>");
+                sb.Append($"<div class=\"desc fit\"><span>{Esc(l.Description ?? "")}</span></div>");
                 var weight = l.Weight is { } w ? $"{Math.Round(w).ToString("#,0", CultureInfo.InvariantCulture)} lbs" : "— lbs";
-                sb.Append($"<div class=\"foot\"><span>QTY {l.Index} of {l.Of}</span><span>{weight}</span><span>JOB {Esc(l.Job)}</span></div>");
+                sb.Append($"<div class=\"foot fit\"><span>QTY {l.Index} of {l.Of}</span><span>{weight}</span><span>JOB {Esc(l.Job)}</span></div>");
                 sb.Append("</div>");
             }
             sb.Append("</section>");
         }
-        sb.Append("</body></html>");
+        sb.Append($"<script>{FitScript}</script></body></html>");
         return sb.ToString();
     }
 
-    // Each label is 2.625 x 1 in; the content sits inside a 0.1 in margin so a slightly off printer
-    // doesn't cut it. Barcode 2.2 in wide leaves the quiet zone each side.
+    // Each label is 2.625 x 1 in. The barcode (2.2 in wide, which leaves the quiet zone each side)
+    // sits at the top; below it, four rows fill the rest of the label to the bottom edge: the code,
+    // the mark and sequence, the description, and qty / weight / job. Each row has a fixed height,
+    // and FitScript gives its text the biggest size that fits that height and the label's width,
+    // so short values print big and a long description shrinks instead of running off the label.
+    // The CSS sizes are what prints if the script doesn't run.
     const string Css = """
         @page { size: letter; margin: 0; }
         * { box-sizing: border-box; }
@@ -163,16 +167,41 @@ public static class Labels
         .sheet { position: relative; width: 8.5in; height: 11in; page-break-after: always; break-after: page; overflow: hidden; }
         .sheet:last-of-type { page-break-after: auto; break-after: auto; }
         @media screen { .sheet { outline: 1px solid #ccc; margin: 0 auto 12px; } .lab { outline: 1px dashed #ddd; } }
-        .lab { position: absolute; width: 2.625in; height: 1in; padding: 0.06in 0.1in 0; overflow: hidden; }
-        .bars { display: block; width: 2.2in; height: 0.33in; margin: 0 auto 0.01in; }
+        .lab { position: absolute; width: 2.625in; height: 1in; padding: 0.04in 0.08in 0.02in; overflow: hidden; display: flex; flex-direction: column; }
+        .bars { display: block; flex: none; width: 2.2in; height: 0.28in; margin: 0 auto; }
         .bars rect { fill: #000; }
-        .val { font: 7pt/0.11in "Courier New", monospace; text-align: center; height: 0.11in; letter-spacing: 0.02in; }
-        .mk { display: flex; justify-content: space-between; align-items: baseline; height: 0.19in; line-height: 0.19in; white-space: nowrap; overflow: hidden; }
-        .mk b { font-size: 12pt; }
-        .mk span { font-size: 9pt; font-weight: 700; }
-        .desc, .foot { font-size: 7pt; line-height: 0.12in; height: 0.12in; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .foot { display: flex; justify-content: space-between; font-weight: 700; }
+        .fit { flex: none; display: flex; align-items: center; white-space: nowrap; overflow: hidden; font-weight: 700; line-height: 1; }
+        .fit > * { flex: none; }
+        .val { height: 0.15in; justify-content: center; font-size: 11pt; letter-spacing: 0.06em; }
+        .mk { height: 0.22in; justify-content: space-between; gap: 0.08in; font-size: 16pt; }
+        .mk b { font-weight: 900; }
+        .mk span { font-size: 0.78em; }
+        .desc { height: 0.13in; font-size: 8pt; }
+        .foot { height: 0.15in; justify-content: space-between; gap: 0.08in; font-size: 9pt; }
         @media print { .noprint { display: none; } }
+        """;
+
+    // Sizes each row's text to fill its row: starts at the row's height and steps down until the
+    // text fits the width too (a 5 pt floor, then the description is cut with "…").
+    const string FitScript = """
+        (function () {
+          function fit() {
+            document.querySelectorAll('.fit').forEach(function (el) {
+              var size = el.clientHeight * 0.92;
+              el.style.fontSize = size + 'px';
+              while (el.scrollWidth > el.clientWidth + 0.5 && size > 6.7) {
+                size -= 0.25;
+                el.style.fontSize = size + 'px';
+              }
+              if (el.scrollWidth > el.clientWidth + 0.5 && el.classList.contains('desc')) {
+                var s = el.firstElementChild;
+                s.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis';
+              }
+            });
+          }
+          if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit); else fit();
+          fit();
+        })();
         """;
 
     static string Inch(double v) => v.ToString("0.0000", CultureInfo.InvariantCulture) + "in";
