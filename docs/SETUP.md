@@ -392,7 +392,7 @@ operation.
 A WebSocket. The first message must be the hello, within 10 seconds:
 
 ```json
-{ "type": "hello", "key": "<ACCESS_KEY>", "deviceId": "<device id>", "kind": "ipad", "version": "0.13.0" }
+{ "type": "hello", "key": "<ACCESS_KEY>", "deviceId": "<device id>", "kind": "ipad", "version": "0.13.1" }
 ```
 
 `kind` is `"ipad"` or `"admin"` (the admin page, which doesn't count as a device). A wrong key closes

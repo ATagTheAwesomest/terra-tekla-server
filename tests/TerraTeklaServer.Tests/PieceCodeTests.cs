@@ -72,8 +72,10 @@ public sealed class PieceCodeTests : IDisposable
         LoadOps.Apply(s, Op("beginScan", new { entryId = "e1", mark = "1001-C1", code = "ABC123456789X" }), Ctx());
         Assert.Equal("ABC123456789X", s.Stacks[0].Items[0].Code);
 
-        var again = Assert.Throws<OpException>(() => LoadOps.Apply(s, Op("beginScan", new { entryId = "e2", mark = "1001-C1", code = "abc123456789x" }), Ctx()));
-        Assert.Contains("already on this load", again.Message);
+        // The same code scanned again on this load (a new row) changes nothing and isn't an error.
+        var (again, _) = LoadOps.Apply(s, Op("beginScan", new { entryId = "e2", mark = "1001-C1", code = "abc123456789x" }), Ctx());
+        Assert.False(again);
+        Assert.Single(s.Stacks[0].Items);
         var elsewhere = Assert.Throws<OpException>(() => LoadOps.Apply(s, Op("beginScan", new { entryId = "e3", mark = "1001-C1", code = "OTHER1234567" }), Ctx(_ => "9")));
         Assert.Contains("already on load 9", elsewhere.Message);
         // The same scan sent again (same row) is fine: nothing happens.
@@ -258,6 +260,44 @@ public sealed class PieceCodeTests : IDisposable
     }
 
     [Fact]
+    public async Task Each_piece_is_tracked_by_its_code_so_a_missing_one_shows()
+    {
+        var ipad = Client();
+        var admin = Client(null, await AdminToken());
+        (await admin.PutAsJsonAsync("/api/admin/jobs/J1/codes/settings", new { enabled = true })).EnsureSuccessStatusCode();
+        (await admin.PostAsJsonAsync("/api/admin/jobs/J1/codes/import", new { text = "code,mark,sequence\nC0000001Q1,1001-C1,1\nC0000002Q1,1001-C1,1\nC0000003Q1,1001-C2,2" })).EnsureSuccessStatusCode();
+
+        // Two pieces go on load 8; the first is scanned twice (harmless) and truck checked.
+        (await ipad.PostAsJsonAsync("/api/loads/L8/ops/batch", new
+        {
+            job = "J1",
+            loadNumber = "8",
+            ops = new object[]
+            {
+                new { op = "beginScan", opId = "p1", entryId = "e1", mark = "1001-C1", code = "C0000001Q1" },
+                new { op = "finishScan", opId = "p2", entryId = "e1", mark = "1001-C1", piece = new { mark = "1001-C1", sequence = "1", weight = 50 } },
+                new { op = "beginScan", opId = "p3", entryId = "e2", mark = "1001-C1", code = "c0000001q1" },
+                new { op = "beginScan", opId = "p4", entryId = "e3", mark = "1001-C2", code = "C0000003Q1" },
+                new { op = "addCheck", opId = "p5", scanId = "k1", mark = "1001-C1", code = "C0000001Q1" },
+            },
+        })).EnsureSuccessStatusCode();
+
+        var all = await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/J1/pieces");
+        Assert.Equal(3, (int)all!["count"]!);
+        Assert.Equal(1, (int)all["loaded"]!); // C0000003Q1 is still sending
+        var pieces = all["pieces"]!.AsArray().ToDictionary(p => (string)p!["code"]!);
+        Assert.Equal("8", (string)pieces["C0000001Q1"]!["load"]!["loadNumber"]!);
+        Assert.False(string.IsNullOrEmpty((string?)pieces["C0000001Q1"]!["load"]!["stack"]));
+        Assert.True((bool)pieces["C0000001Q1"]!["checked"]!);
+        Assert.Null(pieces["C0000002Q1"]!["load"]); // the missing piece
+        Assert.True((bool)pieces["C0000003Q1"]!["pending"]!);
+        Assert.False((bool)pieces["C0000003Q1"]!["checked"]!);
+
+        var one = await ipad.GetFromJsonAsync<JsonObject>("/api/jobs/J1/pieces?mark=1001-c1-");
+        Assert.Equal(2, (int)one!["count"]!);
+    }
+
+    [Fact]
     public async Task A_batch_applies_in_order_and_skips_what_the_load_refuses()
     {
         var ipad = Client();
@@ -277,7 +317,8 @@ public sealed class PieceCodeTests : IDisposable
         var body = await reply.Content.ReadFromJsonAsync<JsonObject>();
         var results = body!["results"]!.AsArray();
         Assert.Null(results[0]!["error"]);
-        Assert.Contains("already on this load", (string)results[1]!["error"]!);
+        Assert.Null(results[1]!["error"]);
+        Assert.False((bool)results[1]!["changed"]!);
         Assert.True((bool)results[2]!["changed"]!);
         Assert.Single(body["state"]!["stacks"]![0]!["items"]!.AsArray());
 
