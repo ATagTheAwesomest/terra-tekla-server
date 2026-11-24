@@ -668,6 +668,112 @@ admin.MapDelete("/jobs/{job}/codes", (string job, HttpContext http) =>
     return Results.Json(new { removed = n });
 });
 
+// Writing the job's piece codes into PowerFab (PowerFabSlot.cs, docs/PIECE-CODES.md): each code goes
+// into one piece's instance location. GET is the preview (reads GetAssemblies only), POST writes,
+// DELETE clears what this server wrote.
+async Task<(SlotPlan? Plan, int Assemblies, IResult? Error)> SlotPlanAsync(string job, IHttpClientFactory factory, CancellationToken ct)
+{
+    if (settings.ConversionUrl == "")
+        return (null, 0, Results.Problem("This server has no CONVERSION_URL, so PowerFab can't be reached.", statusCode: 502));
+    var reply = await PowerFabAsync(factory, "GetAssemblies", new JsonObject { ["JobNumber"] = job }.ToJsonString(), ct, "admin");
+    if (reply.Error is not null || reply.Status >= 400)
+        return (null, 0, Results.Problem(reply.Error ?? $"PowerFab answered {reply.Status} to GetAssemblies: {Trim(reply.Body, 300)}", statusCode: 502));
+    List<SlotAssembly> assemblies;
+    try
+    {
+        assemblies = PowerFabSlot.Assemblies(JsonNode.Parse(reply.Body));
+    }
+    catch (System.Text.Json.JsonException ex)
+    {
+        return (null, 0, Results.Problem($"PowerFab's assembly list couldn't be read: {ex.Message}", statusCode: 502));
+    }
+    if (assemblies.Count == 0)
+        return (null, 0, Results.Problem($"PowerFab has no assemblies for job {job} (or this server's PowerFab user can't see the job).", statusCode: 404));
+    return (PowerFabSlot.Plan(store.Codes(job), assemblies, store.PowerFabCodes(job)), assemblies.Count, null);
+}
+
+object SlotPlanView(SlotPlan plan, int assemblies) => new
+{
+    slot = PowerFabSlot.Name,
+    command = PowerFabSlot.Command,
+    assemblies,
+    writeCount = plan.Write.Count,
+    write = plan.Write.Take(200),
+    doneCount = plan.Done.Count,
+    skippedCount = plan.Skipped.Count,
+    skipped = plan.Skipped.Take(200),
+    maxPerRun = PowerFabSlot.MaxPerRun,
+};
+
+admin.MapGet("/jobs/{job}/codes/powerfab", async (string job, IHttpClientFactory factory, HttpContext http) =>
+{
+    var (plan, assemblies, error) = await SlotPlanAsync(job, factory, http.RequestAborted);
+    return error ?? Results.Json(SlotPlanView(plan!, assemblies), Json.Options);
+});
+
+// Body: {"expected": writeCount from the preview}. Refused (409) when the preview is out of date.
+// Writes one code at a time, at most PowerFabSlot.MaxPerRun, and stops after 3 refusals in a row.
+admin.MapPost("/jobs/{job}/codes/powerfab", async (string job, SlotRun body, IHttpClientFactory factory, HttpContext http) =>
+{
+    var (plan, _, error) = await SlotPlanAsync(job, factory, http.RequestAborted);
+    if (error is not null)
+        return error;
+    if (body.Expected != plan!.Write.Count)
+        return Results.Problem($"The list changed since the preview ({plan.Write.Count} to write now, not {body.Expected}). Preview again.", statusCode: 409);
+    var me = Me(http) ?? AdminDevice;
+    var written = 0;
+    var failed = new List<object>();
+    var inARow = 0;
+    foreach (var w in plan.Write.Take(PowerFabSlot.MaxPerRun))
+    {
+        var reply = await PowerFabAsync(factory, PowerFabSlot.Command, PowerFabSlot.Request(job, w.MainMark, w.Sequence, w.Instance, w.Code), CancellationToken.None, "admin");
+        if (reply.Error is null && reply.Status is >= 200 and < 300)
+        {
+            store.PowerFabCodeWritten(job, w, me);
+            written++;
+            inARow = 0;
+            continue;
+        }
+        failed.Add(new { w.Code, mark = w.MainMark, w.Sequence, w.Instance, error = reply.Error ?? Trim(reply.Body, 300) });
+        if (++inARow >= 3)
+            break;
+    }
+    var stopped = inARow >= 3;
+    if (written > 0 || failed.Count > 0)
+        store.PowerFabCodesActivity(job, me, "codes-powerfab",
+            $"Wrote {written} piece code{(written == 1 ? "" : "s")} of job {job} into PowerFab's {PowerFabSlot.Name.ToLowerInvariant()}" + (failed.Count > 0 ? $", {failed.Count} refused" : ""));
+    return Results.Json(new { written, failed, stopped, left = plan.Write.Count - written - failed.Count }, Json.Options);
+});
+
+// Undo: clears the instance location of every piece this server wrote a code into, and forgets them.
+admin.MapDelete("/jobs/{job}/codes/powerfab", async (string job, IHttpClientFactory factory, HttpContext http) =>
+{
+    if (settings.ConversionUrl == "")
+        return Results.Problem("This server has no CONVERSION_URL, so PowerFab can't be reached.", statusCode: 502);
+    var me = Me(http) ?? AdminDevice;
+    var cleared = 0;
+    var failed = new List<object>();
+    foreach (var w in store.PowerFabCodes(job))
+    {
+        var reply = await PowerFabAsync(factory, PowerFabSlot.Command, PowerFabSlot.Request(job, w.MainMark, w.Sequence, w.Instance, ""), CancellationToken.None, "admin");
+        if (reply.Error is null && reply.Status is >= 200 and < 300)
+        {
+            store.PowerFabCodeCleared(job, w.Code);
+            cleared++;
+        }
+        else
+        {
+            failed.Add(new { w.Code, mark = w.MainMark, w.Sequence, w.Instance, error = reply.Error ?? Trim(reply.Body, 300) });
+            if (failed.Count >= 3)
+                break;
+        }
+    }
+    if (cleared > 0 || failed.Count > 0)
+        store.PowerFabCodesActivity(job, me, "codes-powerfab-clear",
+            $"Cleared {cleared} piece code{(cleared == 1 ? "" : "s")} of job {job} from PowerFab's {PowerFabSlot.Name.ToLowerInvariant()}" + (failed.Count > 0 ? $", {failed.Count} refused" : ""));
+    return Results.Json(new { cleared, failed }, Json.Options);
+});
+
 admin.MapGet("/boms", () => store.BomJobs().Select(j => new { job = j.Job, info = j.Info }));
 
 // Puts a BOM in the job's slot: the file itself as the body (an .xlsx or a CSV), its name in
@@ -1359,6 +1465,7 @@ public partial class Program
 public sealed record DeviceUpdate(string? Name, string? Color);
 public sealed record DeviceMerge(string? Into);
 public sealed record CodeImport(string? Text, bool Overwrite);
+public sealed record SlotRun(int Expected);
 public sealed record PinRequest(string? Pin);
 public sealed record PinChange(string? Current, string? Pin);
 public sealed record UrlRequest(string? Url);

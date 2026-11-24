@@ -2,8 +2,8 @@
 
 Some jobs put a long unique code on every single piece, not just a mark on the assembly: a mark with
 40 pieces has 40 different codes. On those jobs, loading and the truck check can scan each piece's
-code, so the server knows exactly which piece went on which truck. PowerFab never sees the codes;
-they live in this server's database only.
+code, so the server knows exactly which piece went on which truck. The codes live in this server's
+database, and can also be written into PowerFab (see "Writing codes into PowerFab").
 
 Piece codes are **off** for every job until switched on. A job with them off works exactly as before.
 
@@ -63,6 +63,38 @@ the iPads or handhelds for now: an export isn't live, so it would go stale. It n
   loaded by mark ticks off a row of its mark that has no code. The same code twice is refused. Each
   mark shows how many of its pieces are checked (`1001-C1 12/40`).
 
+## Writing codes into PowerFab
+
+PowerFab can hold the codes too, one per piece, in each piece's **Instance location**.
+
+Why that field: PowerFab's API has no command that edits an item's own fields. Cost code (used for
+the transmittal number), remark, category, sub category, reference number, pay category and user
+fields can only be read through it (all 252 commands were listed and tried, see
+tekla-conversion-layer `docs/powerfab`). The one per-piece value it lets a program write is an
+instance's location, through `SetInstanceLocation` (JobNumber, MainMark, Sequence, InstanceNumbers,
+InstanceLocation).
+
+Jobs › the job › Piece codes › **Write codes into PowerFab** (needs the admin code):
+
+- **Preview** reads the job's assemblies from PowerFab (`GetAssemblies`) and lists what would be
+  written: each code with its mark, sequence and piece number. A mark with 9 pieces in a sequence
+  gets its codes on pieces 1 to 9, in code order (`C9227621Q1` before `C9227622Q1`). It also lists the
+  codes that can't go, and why: mark not in PowerFab, sequence not given and the mark is in several,
+  wrong sequence, or more codes than pieces. Nothing changes in PowerFab.
+- **Write** sends one `SetInstanceLocation` per code (at most 1,000 per press) and stops after 3
+  refusals in a row. The server remembers which piece got which code, so a later import only fills the
+  pieces still free and nothing is written twice.
+- **Clear the codes written** (press twice) blanks the instance location of every piece this server
+  wrote, and forgets them.
+
+Check before using it:
+
+- **Does your shop use Instance location** (yard or bay locations)? This overwrites it.
+- **Try it on one job first** and look at a piece in PowerFab: the instance numbers are taken as 1 to
+  the mark's quantity in that sequence, which is how the test run on EPM-001 worked, but it wasn't
+  checked whether PowerFab numbers instances per sequence or across the whole job.
+- The bridge must allow writes (`POWERFAB_ALLOW_WRITES`), as it already does for loading.
+
 ## API
 
 | Method | Path | What |
@@ -74,6 +106,9 @@ the iPads or handhelds for now: an export isn't live, so it would go stale. It n
 | PUT | `/api/admin/jobs/{job}/codes/settings` | `{ enabled, pattern, learn }`. 400 if the pattern isn't a valid regex. |
 | POST | `/api/admin/jobs/{job}/codes/import` | `{ text, overwrite }`. Answers `{ read, added, updated, unchanged, conflicts, conflictCount, errors, errorCount }`. |
 | DELETE | `/api/admin/jobs/{job}/codes` | Removes the job's list. `{ removed }`. |
+| GET | `/api/admin/jobs/{job}/codes/powerfab` | Preview of writing the codes into PowerFab: `{ slot, command, assemblies, writeCount, write: [{ code, mainMark, sequence, instance }], doneCount, skippedCount, skipped: [{ code, mark, sequence, reason }], maxPerRun }` (first 200 of each list). 502 when PowerFab can't be read. |
+| POST | `/api/admin/jobs/{job}/codes/powerfab` | `{ expected }` (the preview's `writeCount`; 409 when it changed). Answers `{ written, failed: [{ code, mark, sequence, instance, error }], stopped, left }`. |
+| DELETE | `/api/admin/jobs/{job}/codes/powerfab` | Clears the instance location of the pieces written. `{ cleared, failed }`. |
 
 Operations carry the code: `beginScan` takes `code` (with one `entryId`) and refuses a code already on
 this or another load of the job; `addCheck` takes `code` (a repeat of a code already checked changes

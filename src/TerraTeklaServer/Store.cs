@@ -111,6 +111,10 @@ public sealed class Store
         CREATE TABLE IF NOT EXISTS job_bom (
             job TEXT NOT NULL COLLATE NOCASE, mark TEXT NOT NULL COLLATE NOCASE, transmittal TEXT NOT NULL COLLATE NOCASE,
             row TEXT NOT NULL, PRIMARY KEY (job, mark, transmittal));
+        CREATE TABLE IF NOT EXISTS powerfab_codes (
+            job TEXT NOT NULL COLLATE NOCASE, code TEXT NOT NULL COLLATE NOCASE, main_mark TEXT NOT NULL,
+            sequence TEXT NOT NULL, instance INTEGER NOT NULL, written_at TEXT NOT NULL, written_by TEXT,
+            PRIMARY KEY (job, code));
         """;
 
     // Indexes on columns added by AddColumn (databases made before them get the column first).
@@ -690,6 +694,42 @@ public sealed class Store
         if (n > 0)
             AddActivity(db, DateTime.UtcNow.ToString("o"), by, "codes-clear", job, null, null, null, null, null, $"Removed all {n} piece codes of job {job}");
         return n;
+    }
+
+    // ---- Codes written into PowerFab (PowerFabSlot.cs) ----
+
+    /// <summary>The job's codes this server has written into PowerFab's instance location.</summary>
+    public List<SlotWritten> PowerFabCodes(string job)
+    {
+        using var db = Open();
+        return Rows(db, "SELECT code, main_mark, sequence, instance, written_at, written_by FROM powerfab_codes WHERE job = $job ORDER BY code",
+            r => new SlotWritten(r.GetString(0), r.GetString(1), r.GetString(2), r.GetInt32(3), r.GetString(4), r.IsDBNull(5) ? null : r.GetString(5)), ("$job", job));
+    }
+
+    /// <summary>Remembers that PowerFab took <paramref name="w"/> (a code written before for another piece is moved).</summary>
+    public void PowerFabCodeWritten(string job, SlotWrite w, Device by)
+    {
+        using var db = Open();
+        Exec(db, """
+            INSERT INTO powerfab_codes (job, code, main_mark, sequence, instance, written_at, written_by)
+            VALUES ($job, $code, $mark, $seq, $instance, $at, $by)
+            ON CONFLICT (job, code) DO UPDATE SET main_mark = $mark, sequence = $seq, instance = $instance, written_at = $at, written_by = $by
+            """, ("$job", job), ("$code", w.Code), ("$mark", w.MainMark), ("$seq", w.Sequence), ("$instance", w.Instance),
+            ("$at", DateTime.UtcNow.ToString("o")), ("$by", by.Name));
+    }
+
+    /// <summary>Forgets a written code (after PowerFab's instance location was cleared).</summary>
+    public void PowerFabCodeCleared(string job, string code)
+    {
+        using var db = Open();
+        Exec(db, "DELETE FROM powerfab_codes WHERE job = $job AND code = $code", ("$job", job), ("$code", code));
+    }
+
+    /// <summary>One line in the activity log for a run of writes or clears.</summary>
+    public void PowerFabCodesActivity(string job, Device by, string what, string text)
+    {
+        using var db = Open();
+        AddActivity(db, DateTime.UtcNow.ToString("o"), by, what, job, null, null, null, null, null, text);
     }
 
     /// <summary>Where a code is now: the load and mark of the row that has it, if any.</summary>

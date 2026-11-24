@@ -4,7 +4,7 @@ namespace TerraTeklaServer;
 
 // Piece codes: on some jobs every piece of an assembly carries its own long unique code (a mark with
 // 40 pieces has 40 codes). Scanning a code loads, or truck checks, that one piece. Codes are kept here
-// only (PowerFab doesn't know them), per job: code -> mark (and sequence when known). They come from
+// (PowerFab only gets them when the admin board writes them into its instance location, PowerFabSlot.cs), per job: code -> mark (and sequence when known). They come from
 // a list pasted on the admin board, from an API later, or are paired on an iPad (a code not on the
 // list is scanned, then its piece's mark). See docs/PIECE-CODES.md.
 
