@@ -310,13 +310,13 @@ function fillPhotos() {
 let freshIds = new Set();
 
 async function pageHome() {
-  const [items] = await Promise.all([api('/activity?limit=80'), refreshHealth()]);
+  const [items] = await Promise.all([api(`/activity?limit=${RECENT}`), refreshHealth()]);
   const online = devices.filter((d) => d.online).length;
   return `<div class="grid">
     <div>
       <section class="panel">
         <h2>Devices <span class="muted">· ${online} connected</span></h2>
-        <div class="devices">${devices.length ? devices.map(deviceCard).join('') : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}</div>
+        ${devices.length ? `<div class="table-wrap"><table><thead><tr><th>Number</th><th>Name</th><th>Status</th><th>Last seen</th><th>App</th></tr></thead><tbody>${devices.map(deviceRow).join('')}</tbody></table></div>` : '<p class="muted">No iPad has connected yet. Open the app on one: it shows up here.</p>'}
         ${devices.length > 1 ? '<p class="muted">One iPad listed more than once (Safari and the home screen app, or the app installed again)? Open the extra one and merge it into the one to keep.</p>' : ''}
       </section>
       <section class="panel">
@@ -331,10 +331,19 @@ async function pageHome() {
     </div>
     <section class="panel">
       <h2>Recent activity</h2>
-      <div data-feed>${feed(items, { fresh: freshIds })}</div>
-      ${moreButton(items, 80)}
+      <div data-feed>${recent(items, '')}</div>
     </section>
   </div>`;
+}
+
+function deviceRow(d) {
+  return `<tr>
+    <td><span class="dot-swatch" style="--c:${esc(d.color)}"></span> ${esc(d.user ?? '')}</td>
+    <td><a href="#/device/${enc(d.id)}"><b>${esc(d.name)}</b></a></td>
+    <td>${d.online ? '<span class="pill ok">Connected</span>' : '<span class="muted">Not connected</span>'}</td>
+    <td data-v="${esc(d.lastSeenAt ?? '')}">${d.online ? 'Now' : esc(ago(d.lastSeenAt))}</td>
+    <td>${esc(d.appVersion ? `v${d.appVersion}` : '')}</td>
+  </tr>`;
 }
 
 function deviceCard(d) {
@@ -368,7 +377,7 @@ async function pageDevice(id) {
   const d = deviceOf(id);
   if (!d) return '<p class="error">No such device.</p>';
   const [items, photos] = await Promise.all([
-    api(`/activity?device=${enc(id)}&limit=100`),
+    api(`/activity?device=${enc(id)}&limit=${RECENT}`),
     health?.photosEnabled ? api(`/photos/recent?device=${enc(id)}&limit=24`).catch(() => []) : [],
   ]);
   const swatches = [...new Set([...PALETTE, d.color])].map((c) => `<button type="button" class="swatch${c === d.color ? ' on' : ''}" style="--c:${c}" data-color="${c}" aria-label="Colour ${c}"></button>`).join('');
@@ -394,8 +403,7 @@ async function pageDevice(id) {
     </div>
     <section class="panel">
       <h2>What ${esc(d.name)} did recently</h2>
-      <div data-feed>${feed(items, { empty: 'Nothing yet.', fresh: freshIds })}</div>
-      ${moreButton(items, 100)}
+      <div data-feed>${recent(items, `device=${enc(id)}`)}</div>
     </section>
   </div>`;
 }
@@ -464,7 +472,7 @@ function filterJobs() {
 }
 
 async function pageJob(job) {
-  const [loads, items] = await Promise.all([api(`/jobs/${enc(job)}/loads`), api(`/activity?job=${enc(job)}&limit=100`)]);
+  const [loads, items] = await Promise.all([api(`/jobs/${enc(job)}/loads`), api(`/activity?job=${enc(job)}&limit=${RECENT}`)]);
   return `<p class="crumbs"><a href="#/jobs">Jobs</a> › ${esc(job)}</p>
   <div class="grid">
     <section class="panel"><h1>Job ${esc(job)}</h1>
@@ -475,7 +483,7 @@ async function pageJob(job) {
         return `<tr><td><a href="#/load/${enc(l.loadId)}"><b>Load ${esc(l.loadNumber)}</b></a></td><td class="num">${l.stacks.length}</td><td class="num">${t.pieces}</td><td class="num">${lbs(t.weight)}</td><td>${checkPill(l)}</td><td>${esc(ago(l.updatedAt))}</td></tr>`;
       }).join('')}</tbody></table>` : '<p class="muted">No loads yet.</p>'}
     </section>
-    <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
+    <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${recent(items, `job=${enc(job)}`)}</div></section>
   </div>
   ${await bomPanel(job)}
   ${await codesPanel(job)}`;
@@ -699,7 +707,7 @@ async function clearCodes(btn) {
 async function pageLoad(loadId, query) {
   const state = await api(`/loads/${enc(loadId)}`);
   const [items, photoList] = await Promise.all([
-    api(`/activity?load=${enc(loadId)}&limit=100`),
+    api(`/activity?load=${enc(loadId)}&limit=${RECENT}`),
     health?.photosEnabled && state.job ? api(`/photos/${enc(state.job)}/${enc(state.loadNumber)}`).then((r) => r.files.map((f) => ({ ...f, job: state.job, load: state.loadNumber }))).catch(() => []) : [],
   ]);
   const t = loadTotals(state);
@@ -736,15 +744,15 @@ async function pageLoad(loadId, query) {
       </section>
       ${health?.photosEnabled ? `<section class="panel"><h2>Photos</h2>${await photoGrid(photoList.slice().reverse(), { empty: 'No photos of this load.' })}</section>` : ''}
     </div>
-    <section class="panel"><h2>Activity on this load</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>
+    <section class="panel"><h2>Activity on this load</h2><div data-feed>${recent(items, `load=${enc(loadId)}`)}</div></section>
   </div>`;
 }
 
 async function pageMark(mark, query) {
   const job = query.get('job') ?? '';
-  const items = await api(`/activity?mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}&limit=100`);
+  const items = await api(`/activity?mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}&limit=${RECENT}`);
   return `<p class="crumbs">${job ? `<a href="#/job/${enc(job)}">${esc(job)}</a> › ` : ''}Piece ${esc(mark)}</p>
-    <section class="panel"><h1 class="mark">${esc(mark)}</h1><h2>Everything done with this mark</h2><div data-feed>${feed(items, { fresh: freshIds })}</div>${moreButton(items, 100)}</section>`;
+    <section class="panel"><h1 class="mark">${esc(mark)}</h1><h2>Everything done with this mark</h2><div data-feed>${recent(items, `mark=${enc(mark)}${job ? `&job=${enc(job)}` : ''}`)}</div></section>`;
 }
 
 // Photos: every job with photos › its loads › the photos, read from the photo folders (so photos
@@ -1534,7 +1542,7 @@ async function draw() {
   const arg = decodeURIComponent(rest.join('/'));
   const query = new URLSearchParams(qs ?? '');
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active',
-    a.dataset.nav === (page === '' || page === 'device' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
+    a.dataset.nav === (page === '' || page === 'device' || page === 'history' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
   if (redrawReason === 'nav') newestShown = NEWEST_PAGE; // "Show more" stays through live redraws only
   grids.clear();
   currentPage = page;
@@ -1548,6 +1556,8 @@ async function draw() {
       : page === 'mark' ? pageMark(arg, query)
       : page === 'photos' ? pagePhotos(rest.map(decodeURIComponent), query)
       : page === 'docs' ? pageDocs(arg || 'setup')
+      : page === 'history' ? pageHistory(query)
+      : page === 'labels' ? pageLabels(query)
       : pageHome());
     if (seq !== drawing) return;
     const nav = redrawReason === 'nav';
@@ -1562,6 +1572,7 @@ async function draw() {
       restoreScrolls(inner);
     }
     fillPhotos();
+    enhanceTables($('#main'), page);
     if (page === 'jobs') filterJobs();
     if (page === 'photos') filterPhotoJobs();
     if (page === 'settings') refreshUpdates();
@@ -1713,6 +1724,13 @@ function bind() {
     saveDevice(e.target, { name: $('#device-name').value });
   });
   $('#main').addEventListener('change', async (e) => {
+    if (e.target.id === 'labels-job' || e.target.id === 'labels-mark') {
+      const mark = $('#labels-mark').selectedOptions[0];
+      const q = new URLSearchParams({ job: $('#labels-job').value });
+      if ($('#labels-mark').value) { q.set('mark', $('#labels-mark').value); q.set('seq', mark.dataset.seq ?? ''); }
+      location.hash = `#/labels?${q}`;
+      return;
+    }
     if (e.target.id !== 'codes-file' || !e.target.files?.[0]) return;
     // Reads the export here and puts it in the box, so what will be added can be seen first.
     const file = e.target.files[0];
@@ -1738,6 +1756,31 @@ function bind() {
       const target = jump.dataset.jump === 'top' ? null : document.getElementById(jump.dataset.jump);
       if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       else window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    const heading = t.closest('table.sortable thead th');
+    if (heading) { sortByHeading(heading); return; }
+    const slot = t.closest('[data-slot]');
+    if (slot && slot.closest('#sheet-picker')) {
+      const n = Number(slot.dataset.slot);
+      if (labelsUsed.has(n)) labelsUsed.delete(n); else labelsUsed.add(n);
+      redrawReason = 'live';
+      draw();
+      return;
+    }
+    if (t.closest('[data-labels-print]')) { printLabels(t.closest('[data-labels-print]')); return; }
+    if (t.closest('[data-labels-clear]')) { labelsUsed = new Set(); redrawReason = 'live'; draw(); return; }
+    const histMore = t.closest('[data-hist-more]');
+    if (histMore) {
+      histMore.disabled = true;
+      const filter = histMore.dataset.histFilter;
+      const older = await api(`/activity?${filter ? `${filter}&` : ''}before=${histMore.dataset.histMore}&limit=100`);
+      const tbody = document.querySelector('#history-table tbody');
+      if (tbody) tbody.insertAdjacentHTML('beforeend', older.map(historyRow).join(''));
+      if (older.length >= 100) histMore.dataset.histMore = older.at(-1).id;
+      else histMore.remove();
+      histMore.disabled = false;
+      enhanceTables($('#main'), currentPage);
       return;
     }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
@@ -1899,6 +1942,156 @@ function bind() {
     if (currentPage === 'server' && adminToken() && !document.hidden && !$('#dlg-pin').open && !touching && Date.now() - lastScrollAt > 800) { redrawReason = 'live'; draw(); }
   }, 10000);
   $('#dlg-photo').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+}
+
+// ---- Recent activity: a short list on each page, the rest on the History page ----------------
+
+const RECENT = 12;
+
+// The last few lines of an activity list, and a link to all of it (History page, same filter).
+function recent(items, filter) {
+  return `${feed(items.slice(0, RECENT), { fresh: freshIds })}
+    <p class="more-link"><a href="#/history?${filter}">All history ›</a></p>`;
+}
+
+// The History page: every line of an activity filter as a sortable table, "Show older" adds more.
+function historyRow(a) {
+  const link = (href, text) => (text ? `<a href="${href}">${esc(text)}</a>` : '');
+  return `<tr class="${freshIds.has(a.id) ? 'fresh' : ''}">
+    <td data-v="${esc(a.at)}"><time title="${esc(new Date(a.at).toLocaleString())}">${esc(when(a.at))}</time></td>
+    <td>${who(a.deviceId, a.deviceName)}</td>
+    <td><span class="kind ${esc(a.kind)}">${esc(a.kind.replace('-', ' '))}</span></td>
+    <td class="wrap">${esc(a.text)}</td>
+    <td>${a.job ? link(`#/job/${enc(a.job)}`, `Job ${a.job}`) : ''}</td>
+    <td>${a.loadId ? link(`#/load/${enc(a.loadId)}`, `Load ${a.loadNumber ?? ''}`) : a.loadNumber ? link(`#/job/${enc(a.job ?? '')}`, `Load ${a.loadNumber}`) : ''}</td>
+    <td>${a.stackName && a.loadId ? link(`#/load/${enc(a.loadId)}?stack=${enc(a.stackId ?? '')}`, a.stackName) : ''}</td>
+    <td>${a.mark ? link(`#/mark/${enc(a.mark)}${a.job ? `?job=${enc(a.job)}` : ''}`, a.mark) : ''}</td>
+  </tr>`;
+}
+
+function historyFilter(query) {
+  return ['device', 'job', 'load', 'mark'].filter((k) => query.get(k)).map((k) => `${k}=${enc(query.get(k))}`).join('&');
+}
+
+async function pageHistory(query) {
+  const filter = historyFilter(query);
+  const items = await api(`/activity?${filter ? `${filter}&` : ''}limit=100`);
+  const what = [...query.entries()].filter(([k]) => ['device', 'job', 'load', 'mark'].includes(k)).map(([k, v]) => `${k} ${v}`).join(', ') || 'everything';
+  return `<p class="crumbs"><a href="#/">Devices &amp; activity</a> › History</p>
+    <section class="panel"><h1>History</h1>
+      <p class="muted">Every change, newest first. Click a column heading to sort. Showing: ${esc(what)}.</p>
+      ${items.length ? `<div class="table-wrap"><table id="history-table"><thead><tr>
+        <th>When</th><th>Who</th><th>Kind</th><th>What</th><th>Job</th><th>Load</th><th>Stack</th><th>Mark</th></tr></thead>
+        <tbody>${items.map(historyRow).join('')}</tbody></table></div>
+        ${items.length >= 100 ? `<p><button class="btn more" type="button" data-hist-more="${items.at(-1).id}" data-hist-filter="${esc(filter)}">Show older</button></p>` : ''}`
+        : '<p class="muted">Nothing yet.</p>'}
+    </section>`;
+}
+
+// ---- Labels: job, then mark, then the sheet with the used positions picked ---------------------
+
+let labelsUsed = new Set(); // positions 1-30 already used on the first sheet (kept while on the page)
+let labelsJob = '';
+
+async function pageLabels(query) {
+  const jobs = await api('/admin/codes');
+  const withCodes = jobs.filter((j) => j.codes > 0).map((j) => j.job);
+  const job = query.get('job') || labelsJob || withCodes[0] || '';
+  if (job !== labelsJob) labelsUsed = new Set();
+  labelsJob = job;
+  if (!job) return '<h1>Labels</h1><p class="muted">No job has piece codes yet. Add them on a job’s page (Piece codes), then come back here.</p>';
+  const data = await api(`/jobs/${enc(job)}/labels/marks`);
+  const mark = query.get('mark') ?? '';
+  const seq = query.get('seq') ?? '';
+  const picked = data.marks.find((m) => m.mark === mark && m.sequence === seq) ?? null;
+  const pieces = picked ? picked.count : data.total;
+  const cells = Array.from({ length: 30 }, (_, i) => i + 1).map((p) => `<button type="button" class="slot${labelsUsed.has(p) ? ' used' : ''}" data-slot="${p}" aria-pressed="${labelsUsed.has(p)}">${p}</button>`).join('');
+  return `<p class="crumbs">Labels › ${esc(job)}</p>
+    <section class="panel">
+      <h1>Labels</h1>
+      <p class="muted">Piece labels for Avery 5160 sheets (30 to a sheet). Pick the job and a mark, or all of them. Tap the positions already used on the first sheet, so the labels start on the next free one.</p>
+      <form class="label-form" id="form-labels">
+        <label>Job <select id="labels-job">${withCodes.map((j) => `<option value="${esc(j)}"${j === job ? ' selected' : ''}>${esc(j)}</option>`).join('')}</select></label>
+        <label>Mark <select id="labels-mark"><option value="">All marks</option>${data.marks.map((m) => `<option value="${esc(m.mark)}" data-seq="${esc(m.sequence)}"${picked === m ? ' selected' : ''}>${esc(m.mark)} · seq ${esc(m.sequence)} · ${num(m.count)} piece${m.count === 1 ? '' : 's'}</option>`).join('')}</select></label>
+      </form>
+      <p class="muted">${num(pieces)} label${pieces === 1 ? '' : 's'} in this pick${labelsUsed.size ? ` · ${labelsUsed.size} position${labelsUsed.size === 1 ? '' : 's'} marked used` : ''}.</p>
+      <h2>First sheet</h2>
+      <div class="sheet-picker" id="sheet-picker">${cells}</div>
+      <p class="codes-actions">
+        <button class="btn primary" type="button" data-labels-print${pieces ? '' : ' disabled'}>Print ${num(pieces)} label${pieces === 1 ? '' : 's'}</button>
+        <button class="btn" type="button" data-labels-clear>Clear used positions</button>
+      </p>
+      <div id="labels-out"></div>
+    </section>`;
+}
+
+async function printLabels(btn) {
+  const sel = $('#labels-mark');
+  const opt = sel?.selectedOptions?.[0];
+  const q = new URLSearchParams();
+  if (sel?.value) { q.set('mark', sel.value); q.set('seq', opt.dataset.seq ?? ''); }
+  if (labelsUsed.size) q.set('skip', [...labelsUsed].join(','));
+  const out = $('#labels-out');
+  btn.disabled = true;
+  out.innerHTML = '<p class="muted">Making the sheet…</p>';
+  try {
+    const html = await api(`/jobs/${enc(labelsJob)}/labels/sheet?${q}`);
+    const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    if (!window.open(url, '_blank')) throw new Error('The browser blocked the new tab. Allow pop-ups for this site, then press Print again.');
+    out.innerHTML = '<p class="ok-text">The sheet opened in a new tab. Print it at 100 %, with no fit to page.</p>';
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- Sortable tables: every table on the board; a click on a heading sorts it ------------------
+
+const sortState = new Map(); // "page:table index" -> { col, dir }
+
+function sortTable(table, col, dir) {
+  const tbody = table.tBodies[0];
+  if (!tbody) return;
+  const text = (r) => r.cells[col]?.dataset.v ?? r.cells[col]?.textContent.trim() ?? '';
+  const number = (s) => (/^[-−]?\d[\d,]*(\.\d+)?/.test(s) ? parseFloat(s.replace(/,/g, '').replace('−', '-')) : null);
+  const rows = [...tbody.rows].filter((r) => r.cells.length > col);
+  const numeric = rows.every((r) => text(r) === '' || number(text(r)) !== null);
+  rows.sort((a, b) => {
+    const x = text(a);
+    const y = text(b);
+    if (x === '' || y === '') return x === '' ? (y === '' ? 0 : 1) : -1; // blanks always last
+    return dir * (numeric ? number(x) - number(y) : x.localeCompare(y, undefined, { numeric: true, sensitivity: 'base' }));
+  });
+  rows.forEach((r) => tbody.appendChild(r));
+  table.querySelectorAll('thead th').forEach((th, i) => {
+    th.setAttribute('aria-sort', i === col ? (dir === 1 ? 'ascending' : 'descending') : 'none');
+  });
+}
+
+// Marks every table in the page as sortable, and sorts it the way it was last sorted.
+function enhanceTables(root, page) {
+  root.querySelectorAll('table').forEach((table, i) => {
+    if (!table.tHead || !table.tBodies[0]?.rows.length) return;
+    const key = `${page}:${i}`;
+    table.classList.add('sortable');
+    table.dataset.tableKey = key;
+    const state = sortState.get(key);
+    table.querySelectorAll('thead th').forEach((th, c) => {
+      th.tabIndex = 0;
+      th.setAttribute('aria-sort', state?.col === c ? (state.dir === 1 ? 'ascending' : 'descending') : 'none');
+    });
+    if (state) sortTable(table, state.col, state.dir);
+  });
+}
+
+function sortByHeading(th) {
+  const table = th.closest('table');
+  const col = [...th.parentElement.children].indexOf(th);
+  const prev = sortState.get(table.dataset.tableKey);
+  const dir = prev?.col === col ? -prev.dir : 1;
+  sortState.set(table.dataset.tableKey, { col, dir });
+  sortTable(table, col, dir);
 }
 
 async function start() {

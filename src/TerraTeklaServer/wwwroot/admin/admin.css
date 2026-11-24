@@ -314,3 +314,26 @@ main, .grid > *, .panel, .stack { min-width: 0; }
 .speed summary { cursor: pointer; color: var(--muted, #aaa); }
 table.small { font-size: 0.85rem; }
 table.small td { vertical-align: top; }
+
+/* Recent lists: a few lines, then a link to the full History page */
+.more-link { margin: .5rem 0 0; font-size: .9rem; }
+.more-link a { font-weight: 600; }
+
+/* Tables: wide ones scroll inside their own box; sortable headings show their direction */
+.table-wrap { overflow-x: auto; max-width: 100%; }
+.table-wrap table { min-width: 100%; }
+table.sortable th { cursor: pointer; user-select: none; white-space: nowrap; }
+table.sortable th::after { content: "↕"; margin-left: .35rem; color: #666; font-size: .8em; }
+table.sortable th[aria-sort="ascending"]::after { content: "▲"; color: var(--accent); }
+table.sortable th[aria-sort="descending"]::after { content: "▼"; color: var(--accent); }
+table.sortable th:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+td.wrap { white-space: normal; min-width: 14rem; }
+.dot-swatch { display: inline-block; width: .75rem; height: .75rem; border-radius: 50%; background: var(--c, #888); vertical-align: middle; }
+
+/* Labels: the Avery 5160 positions, 3 across and 10 down */
+.label-form { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; margin: .75rem 0; }
+.label-form label { display: grid; gap: .25rem; font-size: .9rem; color: var(--muted); min-width: 14rem; }
+.label-form select { min-height: 44px; font: inherit; background: #1b1b1b; color: var(--text); border: 1px solid #444; border-radius: 8px; padding: .3rem .5rem; }
+.sheet-picker { display: grid; grid-template-columns: repeat(3, minmax(3.5rem, 6rem)); gap: .4rem; max-width: 22rem; margin: .5rem 0 .75rem; }
+.sheet-picker .slot { min-height: 44px; font: inherit; font-variant-numeric: tabular-nums; background: #1b1b1b; color: var(--text); border: 1px solid #444; border-radius: 8px; cursor: pointer; }
+.sheet-picker .slot.used { background: #3d2a12; color: var(--accent); border-color: var(--accent); text-decoration: line-through; }

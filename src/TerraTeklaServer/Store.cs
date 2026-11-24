@@ -51,6 +51,8 @@ public sealed class Store
         AddColumn(db, "entries", "code", "TEXT");
         AddColumn(db, "check_scans", "code", "TEXT");
         AddColumn(db, "piece_codes", "status", "TEXT");
+        AddColumn(db, "piece_codes", "description", "TEXT");
+        AddColumn(db, "piece_codes", "weight", "REAL");
         AddColumn(db, "job_settings", "bom", "TEXT");
         Exec(db, IndexesAfterColumns);
         rev = long.TryParse(Scalar(db, "SELECT value FROM meta WHERE key = 'rev'") as string, out var r) ? r : 0;
@@ -535,19 +537,19 @@ public sealed class Store
     public List<PieceCode> Codes(string job, long since = 0, int limit = 100_000)
     {
         using var db = Open();
-        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND id > $since ORDER BY id LIMIT $limit",
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status, description, weight FROM piece_codes WHERE job = $job AND id > $since ORDER BY id LIMIT $limit",
             ReadCode, ("$job", job), ("$since", since), ("$limit", Math.Clamp(limit, 1, 100_000)));
     }
 
     public PieceCode? FindCode(string job, string code)
     {
         using var db = Open();
-        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND code = $code",
+        return Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status, description, weight FROM piece_codes WHERE job = $job AND code = $code",
             ReadCode, ("$job", job), ("$code", code.Trim())).FirstOrDefault();
     }
 
     static PieceCode ReadCode(SqliteDataReader r) =>
-        new(r.GetInt64(0), r.GetString(1), r.GetString(2), N(r, 3), r.GetString(4), r.GetString(5), N(r, 6), N(r, 7));
+        new(r.GetInt64(0), r.GetString(1), r.GetString(2), N(r, 3), r.GetString(4), r.GetString(5), N(r, 6), N(r, 7), N(r, 8), r.IsDBNull(9) ? null : r.GetDouble(9));
 
     /// <summary>
     /// Adds codes to a job. A code already there with the same mark is left as it is (its sequence is
@@ -562,10 +564,10 @@ public sealed class Store
         var now = DateTime.UtcNow.ToString("o");
         int added = 0, updated = 0, unchanged = 0;
         var conflicts = new List<CodeConflict>();
-        using var find = Prepare(db, "SELECT mark, sequence, status FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
+        using var find = Prepare(db, "SELECT mark, sequence, status, description, weight FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
         using var delete = Prepare(db, "DELETE FROM piece_codes WHERE job = $job AND code = $code", "$job", "$code");
-        using var insert = Prepare(db, "INSERT INTO piece_codes (job, code, mark, sequence, source, added_at, added_by, status) VALUES ($job, $code, $mark, $seq, $source, $at, $by, $status)",
-            "$job", "$code", "$mark", "$seq", "$source", "$at", "$by", "$status");
+        using var insert = Prepare(db, "INSERT INTO piece_codes (job, code, mark, sequence, source, added_at, added_by, status, description, weight) VALUES ($job, $code, $mark, $seq, $source, $at, $by, $status, $desc, $weight)",
+            "$job", "$code", "$mark", "$seq", "$source", "$at", "$by", "$status", "$desc", "$weight");
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var line in lines)
         {
@@ -575,13 +577,16 @@ public sealed class Store
                 continue;
             find.Parameters[0].Value = job;
             find.Parameters[1].Value = code;
-            string? oldMark = null, oldSeq = null, oldStatus = null;
+            string? oldMark = null, oldSeq = null, oldStatus = null, oldDesc = null;
+            double? oldWeight = null;
             using (var r = find.ExecuteReader())
                 if (r.Read())
                 {
                     oldMark = r.GetString(0);
                     oldSeq = N(r, 1);
                     oldStatus = N(r, 2);
+                    oldDesc = N(r, 3);
+                    oldWeight = r.IsDBNull(4) ? null : r.GetDouble(4);
                 }
             if (oldMark is not null)
             {
@@ -591,17 +596,19 @@ public sealed class Store
                     conflicts.Add(new CodeConflict(code, oldMark, mark));
                     continue;
                 }
-                if (sameMark && (line.Sequence is null || line.Sequence == oldSeq) && (line.Status is null || line.Status == oldStatus))
+                if (sameMark && (line.Sequence is null || line.Sequence == oldSeq) && (line.Status is null || line.Status == oldStatus)
+                    && (line.Description is null || line.Description == oldDesc) && (line.Weight is null || line.Weight == oldWeight))
                 {
                     unchanged++;
                     continue;
                 }
                 Run(delete, job, code);
-                Run(insert, job, code, mark, line.Sequence ?? (sameMark ? oldSeq : null), source, now, by.Id, line.Status ?? oldStatus);
+                Run(insert, job, code, mark, line.Sequence ?? (sameMark ? oldSeq : null), source, now, by.Id, line.Status ?? oldStatus,
+                    line.Description ?? (sameMark ? oldDesc : null), line.Weight ?? (sameMark ? oldWeight : null));
                 updated++;
                 continue;
             }
-            Run(insert, job, code, mark, line.Sequence, source, now, by.Id, line.Status);
+            Run(insert, job, code, mark, line.Sequence, source, now, by.Id, line.Status, line.Description, line.Weight);
             added++;
         }
         var count = added + updated;
@@ -612,7 +619,7 @@ public sealed class Store
                     ? $"Paired code {lines[0].Code.Trim()} with {CodeList.CleanMark(lines[0].Mark)}"
                     : $"Piece codes for job {job}: {added} added, {updated} changed, {unchanged} already there{(conflicts.Count > 0 ? $", {conflicts.Count} paired with another mark (left as they were)" : "")}");
         tx.Commit();
-        var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
+        var fresh = count == 0 ? [] : Rows(db, "SELECT id, code, mark, sequence, source, added_at, added_by, status, description, weight FROM piece_codes WHERE job = $job AND added_at = $at ORDER BY id",
             ReadCode, ("$job", job), ("$at", now));
         return new CodesAdded(added, updated, unchanged, conflicts, fresh);
     }
@@ -674,15 +681,23 @@ public sealed class Store
     }
 
     /// <summary>A mark's piece codes, each with the load whose row has it (if any).</summary>
-    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark)
+    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark) =>
+        CodesWithLoads(job, mark).Select(c => (c.Code, c.LoadId, c.LoadNumber)).ToList();
+
+    /// <summary>
+    /// A job's codes (or one mark's) with the load each is on, if any, and whether a truck check has
+    /// ticked it off on that load. The piece tracking view: a code on no load is a piece not shipped.
+    /// </summary>
+    public List<(PieceCode Code, string? LoadId, string? LoadNumber, bool Checked)> CodesWithLoads(string job, string? mark = null)
     {
         using var db = Open();
-        return Rows(db, """
-            SELECT p.id, p.code, p.mark, p.sequence, p.source, p.added_at, p.added_by, p.status,
+        return Rows(db, $"""
+            SELECT p.id, p.code, p.mark, p.sequence, p.source, p.added_at, p.added_by, p.status, p.description, p.weight,
                    (SELECT l.load_id FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
-                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1)
-            FROM piece_codes p WHERE p.job = $job AND p.mark = $mark COLLATE NOCASE ORDER BY p.code
-            """, r => (ReadCode(r), N(r, 8), N(r, 9)), ("$job", job), ("$mark", mark));
+                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
+                   EXISTS (SELECT 1 FROM check_scans c JOIN loads l ON l.load_id = c.load_id WHERE l.job = p.job COLLATE NOCASE AND c.code = p.code COLLATE NOCASE)
+            FROM piece_codes p WHERE p.job = $job {(mark is null ? "" : "AND p.mark = $mark COLLATE NOCASE")} ORDER BY p.mark, p.code
+            """, r => (ReadCode(r), N(r, 10), N(r, 11), r.GetInt64(12) != 0), ("$job", job), ("$mark", mark ?? ""));
     }
 
     /// <summary>Removes every code of a job (rows already loaded keep the code they were scanned with).</summary>
