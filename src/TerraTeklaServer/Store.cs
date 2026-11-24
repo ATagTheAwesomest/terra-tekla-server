@@ -680,24 +680,30 @@ public sealed class Store
         return info is not null;
     }
 
-    /// <summary>A mark's piece codes, each with the load whose row has it (if any).</summary>
-    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark) =>
-        CodesWithLoads(job, mark).Select(c => (c.Code, c.LoadId, c.LoadNumber)).ToList();
-
-    /// <summary>
-    /// A job's codes (or one mark's) with the load each is on, if any, and whether a truck check has
-    /// ticked it off on that load. The piece tracking view: a code on no load is a piece not shipped.
-    /// </summary>
-    public List<(PieceCode Code, string? LoadId, string? LoadNumber, bool Checked)> CodesWithLoads(string job, string? mark = null)
+    /// <summary>A small server-wide value kept in the meta table (for example the Labels tab's part-used sheet).</summary>
+    public string? Meta(string key)
     {
         using var db = Open();
-        return Rows(db, $"""
+        return Scalar(db, "SELECT value FROM meta WHERE key = $k", ("$k", key)) as string;
+    }
+
+    public void SetMeta(string key, string? value)
+    {
+        using var db = Open();
+        if (value is null) Exec(db, "DELETE FROM meta WHERE key = $k", ("$k", key));
+        else Exec(db, "INSERT INTO meta (key, value) VALUES ($k, $v) ON CONFLICT (key) DO UPDATE SET value = $v", ("$k", key), ("$v", value));
+    }
+
+    /// <summary>A mark's piece codes, each with the load whose row has it (if any).</summary>
+    public List<(PieceCode Code, string? LoadId, string? LoadNumber)> CodesOfMark(string job, string mark)
+    {
+        using var db = Open();
+        return Rows(db, """
             SELECT p.id, p.code, p.mark, p.sequence, p.source, p.added_at, p.added_by, p.status, p.description, p.weight,
                    (SELECT l.load_id FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
-                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1),
-                   EXISTS (SELECT 1 FROM check_scans c JOIN loads l ON l.load_id = c.load_id WHERE l.job = p.job COLLATE NOCASE AND c.code = p.code COLLATE NOCASE)
-            FROM piece_codes p WHERE p.job = $job {(mark is null ? "" : "AND p.mark = $mark COLLATE NOCASE")} ORDER BY p.mark, p.code
-            """, r => (ReadCode(r), N(r, 10), N(r, 11), r.GetInt64(12) != 0), ("$job", job), ("$mark", mark ?? ""));
+                   (SELECT l.load_number FROM entries e JOIN loads l ON l.load_id = e.load_id WHERE l.job = p.job COLLATE NOCASE AND e.code = p.code COLLATE NOCASE LIMIT 1)
+            FROM piece_codes p WHERE p.job = $job AND p.mark = $mark COLLATE NOCASE ORDER BY p.code
+            """, r => (ReadCode(r), N(r, 10), N(r, 11)), ("$job", job), ("$mark", mark));
     }
 
     /// <summary>Removes every code of a job (rows already loaded keep the code they were scanned with).</summary>

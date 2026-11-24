@@ -572,9 +572,9 @@ async function codesPanel(job) {
       <p><button class="btn primary" type="submit"${off}>Save</button> <span id="codes-saved" class="muted"></span></p>
     </form>
     <h3>Add codes</h3>
-    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status…), or paste one code per line: code, mark, sequence. Importing the same export again later refreshes each piece's status.</p>
+    <p class="muted">Pick an export file (a CSV with a first line naming its columns: Barcode, Assembly, Sequence, Status, Description, Weight…), or paste one code per line: code, mark, sequence, description, weight. The description and weight are printed on the piece labels (Labels tab). Importing the same export again later refreshes each piece's status.</p>
     <p><input type="file" id="codes-file" accept=".csv,.txt,.tsv,text/csv,text/plain"${off}></p>
-    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence (sequence is optional). Paste from a spreadsheet works too."${off}></textarea>
+    <textarea id="codes-text" rows="6" placeholder="One per line: code, mark, sequence, description, weight (all after the mark optional). Paste from a spreadsheet works too."${off}></textarea>
     <label class="check"><input type="checkbox" id="codes-overwrite"${off}> Move a code already paired with another mark to the mark in this list</label>
     <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
       <button class="btn" type="button" data-codes-clear${off || (r.count ? '' : ' disabled')}>Remove all ${num(r.count)} codes</button></p>
@@ -1525,7 +1525,7 @@ function markdown(md) {
 
 async function pageDocs(name = 'setup') {
   const text = await api(`/docs/${enc(name)}`);
-  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a><a href="#/docs/speed" class="${name === 'speed' ? 'active' : ''}">Scan speed</a></div>
+  return `<div class="tabs"><a href="#/docs/setup" class="${name === 'setup' ? 'active' : ''}">Setup &amp; reference</a><a href="#/docs/photos" class="${name === 'photos' ? 'active' : ''}">Photos</a><a href="#/docs/codes" class="${name === 'codes' ? 'active' : ''}">Piece codes</a><a href="#/docs/bom" class="${name === 'bom' ? 'active' : ''}">Job BOM</a><a href="#/docs/speed" class="${name === 'speed' ? 'active' : ''}">Scan speed</a><a href="#/docs/labels" class="${name === 'labels' ? 'active' : ''}">Labels</a></div>
     ${docContents(text)}
     <article class="panel doc">${markdown(text)}</article>
     <p><a href="#" data-jump="top">↑ Back to the top</a></p>`;
@@ -1577,6 +1577,7 @@ async function draw() {
     if (page === 'jobs') filterJobs();
     if (page === 'photos') filterPhotoJobs();
     if (page === 'settings') refreshUpdates();
+    if (page === 'labels') labelsRefresh();
     const focus = query.get('stack');
     if (focus && redrawReason === 'nav') document.getElementById(`stack-${focus}`)?.scrollIntoView({ block: 'start' });
   } catch (err) {
@@ -1593,7 +1594,7 @@ let currentPage = '';
 // Live changes redraw the page, at most a few times a second. Settings is never redrawn by itself,
 // so nothing being typed there is lost.
 function redrawSoon() {
-  if (currentPage === 'settings' || $('#dlg-pin').open) return;
+  if (currentPage === 'settings' || currentPage === 'labels' || $('#dlg-pin').open) return;
   if (document.querySelector('input:focus') || $('#dlg-photo').open) return;
   clearTimeout(redrawTimer);
   redrawTimer = setTimeout(() => {
@@ -1725,13 +1726,7 @@ function bind() {
     saveDevice(e.target, { name: $('#device-name').value });
   });
   $('#main').addEventListener('change', async (e) => {
-    if (e.target.id === 'labels-job' || e.target.id === 'labels-mark') {
-      const mark = $('#labels-mark').selectedOptions[0];
-      const q = new URLSearchParams({ job: $('#labels-job').value });
-      if ($('#labels-mark').value) { q.set('mark', $('#labels-mark').value); q.set('seq', mark.dataset.seq ?? ''); }
-      location.hash = `#/labels?${q}`;
-      return;
-    }
+    if (currentPage === 'labels' && await labelsChange(e.target)) return;
     if (e.target.id !== 'codes-file' || !e.target.files?.[0]) return;
     // Reads the export here and puts it in the box, so what will be added can be seen first.
     const file = e.target.files[0];
@@ -1748,6 +1743,7 @@ function bind() {
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
     if (e.target.id === 'photo-job-filter') { photoJobFilter = e.target.value; filterPhotoJobs(); }
+    labelsInput(e.target);
     const tf = e.target.closest?.('[data-table-filter]');
     if (tf) {
       filterState.set(tf.dataset.tableFilter, tf.value);
@@ -1772,16 +1768,7 @@ function bind() {
     }
     const heading = t.closest('table.sortable thead th');
     if (heading) { sortByHeading(heading); return; }
-    const slot = t.closest('[data-slot]');
-    if (slot && slot.closest('#sheet-picker')) {
-      const n = Number(slot.dataset.slot);
-      if (labelsUsed.has(n)) labelsUsed.delete(n); else labelsUsed.add(n);
-      redrawReason = 'live';
-      draw();
-      return;
-    }
-    if (t.closest('[data-labels-print]')) { printLabels(t.closest('[data-labels-print]')); return; }
-    if (t.closest('[data-labels-clear]')) { labelsUsed = new Set(); redrawReason = 'live'; draw(); return; }
+    if (await labelsClick(t)) return;
     const histMore = t.closest('[data-hist-more]');
     if (histMore) {
       histMore.disabled = true;
@@ -2041,7 +2028,7 @@ function historyCsv() {
   const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
   const rows = [['When', 'Who', 'Kind', 'What', 'Job', 'Load', 'Stack', 'Mark'],
     ...historyShown.map((a) => [new Date(a.at).toLocaleString(), deviceOf(a.deviceId)?.name ?? a.deviceName ?? '', a.kind, a.text, a.job, a.loadNumber, a.stackName, a.mark])];
-  const blob = new Blob([`﻿${rows.map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`], { type: 'text/csv' });
+  const blob = new Blob([`\ufeff${rows.map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`], { type: 'text/csv' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download = `terra-history-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -2049,62 +2036,257 @@ function historyCsv() {
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
-// ---- Labels: job, then mark, then the sheet with the used positions picked ---------------------
+// ---- Labels (docs/LABELS.md): job, what to print, the sheet positions, then print -------------
+// The page keeps its state here and redraws itself (live changes don't redraw it, so a half-typed
+// code list or a half-marked sheet is never lost).
 
-let labelsUsed = new Set(); // positions 1-30 already used on the first sheet (kept while on the page)
-let labelsJob = '';
+const labels = {
+  job: '',
+  mode: 'all', // all | mark | codes
+  mark: '', // "mark|sequence" picked in mark mode
+  pieces: [], // the picked mark's labels (from /jobs/{job}/labels)
+  unticked: new Set(), // codes of the picked mark not to print
+  codesText: '', // codes mode: scanned or pasted, one per line
+  used: new Set(), // positions 1-30 already used on the sheet in the printer (kept on the server)
+  skip: new Set(), // free positions to leave empty this time only
+  tapMeans: 'used', // what a tap on a free position does: used | skip
+  last: null, // the last print: { used: [...] } to save once it printed OK
+  info: null, // /labels/marks of the job
+};
+
+const SHEET = 30;
+
+// The labels in the current pick (a count; codes mode counts distinct lines).
+function labelsCount() {
+  if (labels.mode === 'all') return labels.info?.total ?? 0;
+  if (labels.mode === 'mark') return labels.pieces.filter((p) => !labels.unticked.has(p.code)).length;
+  return labelsCodeList().length;
+}
+
+function labelsCodeList() {
+  const seen = new Set();
+  return labels.codesText.split(/[\s,;]+/).map((c) => c.trim()).filter((c) => c && !seen.has(c.toUpperCase()) && seen.add(c.toUpperCase()));
+}
+
+// The free positions to fill on the sheet in the printer, in order (same rule as Labels.Place).
+function labelsFree() {
+  return Array.from({ length: SHEET }, (_, i) => i + 1).filter((p) => !labels.used.has(p) && !labels.skip.has(p));
+}
+
+// Where `count` labels go: [{ sheet, pos }], first sheet into the free positions, then new sheets.
+function labelsPlace(count) {
+  const out = [];
+  let sheet = 0;
+  let queue = labelsFree();
+  if (!queue.length) queue = Array.from({ length: SHEET }, (_, i) => i + 1);
+  while (out.length < count) {
+    if (!queue.length) { sheet++; queue = Array.from({ length: SHEET }, (_, i) => i + 1); }
+    out.push({ sheet, pos: queue.shift() });
+  }
+  return out;
+}
 
 async function pageLabels(query) {
   const jobs = await api('/admin/codes');
   const withCodes = jobs.filter((j) => j.codes > 0).map((j) => j.job);
-  const job = query.get('job') || labelsJob || withCodes[0] || '';
-  if (job !== labelsJob) labelsUsed = new Set();
-  labelsJob = job;
-  if (!job) return '<h1>Labels</h1><p class="muted">No job has piece codes yet. Add them on a job’s page (Piece codes), then come back here.</p>';
-  const data = await api(`/jobs/${enc(job)}/labels/marks`);
-  const mark = query.get('mark') ?? '';
-  const seq = query.get('seq') ?? '';
-  const picked = data.marks.find((m) => m.mark === mark && m.sequence === seq) ?? null;
-  const pieces = picked ? picked.count : data.total;
-  const cells = Array.from({ length: 30 }, (_, i) => i + 1).map((p) => `<button type="button" class="slot${labelsUsed.has(p) ? ' used' : ''}" data-slot="${p}" aria-pressed="${labelsUsed.has(p)}">${p}</button>`).join('');
-  return `<p class="crumbs">Labels › ${esc(job)}</p>
-    <section class="panel">
+  const job = query.get('job') || labels.job || withCodes[0] || '';
+  if (job !== labels.job) Object.assign(labels, { job, mark: '', pieces: [], unticked: new Set(), last: null });
+  if (!job) {
+    return `<section class="panel"><h1>Labels</h1>
+      <p class="muted">No job has piece codes yet. Add them on a job’s page (Piece codes), then come back here.</p></section>`;
+  }
+  const [info, state] = await Promise.all([api(`/admin/jobs/${enc(job)}/labels/marks`), api('/admin/labels/sheet-state')]);
+  labels.info = info;
+  labels.used = new Set(state.used);
+  labels.used.forEach((p) => labels.skip.delete(p));
+  if (labels.mode === 'mark' && labels.mark && !labels.pieces.length) {
+    const [mark, seq] = labels.mark.split('|');
+    labels.pieces = await api(`/admin/jobs/${enc(job)}/labels?mark=${enc(mark)}&seq=${enc(seq)}`);
+  }
+  const jobOptions = (withCodes.includes(job) ? withCodes : [job, ...withCodes])
+    .map((j) => `<option value="${esc(j)}"${j === job ? ' selected' : ''}>${esc(j)}</option>`).join('');
+  const modeBtn = (m, text) => `<button type="button" class="seg${labels.mode === m ? ' on' : ''}" data-labels-mode="${m}" aria-pressed="${labels.mode === m}">${text}</button>`;
+  const missing = [info.missingDescription ? `${num(info.missingDescription)} without a description` : '', info.missingWeight ? `${num(info.missingWeight)} without a weight` : ''].filter(Boolean);
+  return `<section class="panel labels-page">
       <h1>Labels</h1>
-      <p class="muted">Piece labels for Avery 5160 sheets (30 to a sheet). Pick the job and a mark, or all of them. Tap the positions already used on the first sheet, so the labels start on the next free one.</p>
-      <form class="label-form" id="form-labels">
-        <label>Job <select id="labels-job">${withCodes.map((j) => `<option value="${esc(j)}"${j === job ? ' selected' : ''}>${esc(j)}</option>`).join('')}</select></label>
-        <label>Mark <select id="labels-mark"><option value="">All marks</option>${data.marks.map((m) => `<option value="${esc(m.mark)}" data-seq="${esc(m.sequence)}"${picked === m ? ' selected' : ''}>${esc(m.mark)} · seq ${esc(m.sequence)} · ${num(m.count)} piece${m.count === 1 ? '' : 's'}</option>`).join('')}</select></label>
-      </form>
-      <p class="muted">${num(pieces)} label${pieces === 1 ? '' : 's'} in this pick${labelsUsed.size ? ` · ${labelsUsed.size} position${labelsUsed.size === 1 ? '' : 's'} marked used` : ''}.</p>
-      <h2>First sheet</h2>
-      <div class="sheet-picker" id="sheet-picker">${cells}</div>
+      <p class="muted">Piece labels on Avery 5160 sheets (30 to a sheet, 3 across, 10 down): the barcode on top, then the mark, sequence, description, qty, weight and job.</p>
+      <div class="label-form">
+        <label>Job <select id="labels-job">${jobOptions}</select></label>
+      </div>
+      <p class="muted">${num(info.total)} piece code${info.total === 1 ? '' : 's'} on job ${esc(job)}, ${num(info.marks.length)} mark${info.marks.length === 1 ? '' : 's'}.${missing.length ? ` <span class="warn-text">${esc(missing.join(', '))}: import the code list again with Description and Weight columns, or upload the job’s BOM.</span>` : ''}</p>
+      <h2>What to print</h2>
+      <div class="segs" role="group" aria-label="What to print">${modeBtn('all', 'Whole job')}${modeBtn('mark', 'One assembly')}${modeBtn('codes', 'Chosen barcodes')}</div>
+      ${labelsPickHtml()}
+      <h2>The sheet in the printer</h2>
+      <p class="muted">Tap the positions already peeled off, so the labels go into the free ones. The server remembers the sheet between prints.</p>
+      <div class="segs small" role="group" aria-label="A tap on a free position">
+        <span class="muted">A tap marks a position</span>
+        <button type="button" class="seg${labels.tapMeans === 'used' ? ' on' : ''}" data-labels-tap="used">Used</button>
+        <button type="button" class="seg${labels.tapMeans === 'skip' ? ' on' : ''}" data-labels-tap="skip">Leave empty this time</button>
+      </div>
+      <div class="sheet-picker" id="sheet-picker" aria-label="Label positions, row by row"></div>
+      <p class="legend muted"><span class="slot-key print"></span> gets a label <span class="slot-key free"></span> free <span class="slot-key used"></span> used <span class="slot-key skip"></span> left empty</p>
+      <p class="muted" id="labels-summary"></p>
       <p class="codes-actions">
-        <button class="btn primary" type="button" data-labels-print${pieces ? '' : ' disabled'}>Print ${num(pieces)} label${pieces === 1 ? '' : 's'}</button>
-        <button class="btn" type="button" data-labels-clear>Clear used positions</button>
+        <button class="btn primary" type="button" data-labels-print>Print</button>
+        <button class="btn" type="button" data-labels-new-sheet>New sheet (all free)</button>
       </p>
-      <div id="labels-out"></div>
+      <div id="labels-out">${labels.last ? labelsAfterPrintHtml() : ''}</div>
     </section>`;
 }
 
+function labelsPickHtml() {
+  if (labels.mode === 'all') return `<p>Every piece code of the job, by mark and sequence.</p>`;
+  if (labels.mode === 'codes') {
+    return `<div class="field"><label for="labels-codes">Scan or paste the barcodes to reprint, one per line</label>
+      <textarea id="labels-codes" rows="6" spellcheck="false" autocomplete="off" placeholder="C9227621Q1">${esc(labels.codesText)}</textarea></div>`;
+  }
+  const opts = labels.info.marks.map((m) => {
+    const v = `${m.mark}|${m.sequence}`;
+    return `<option value="${esc(v)}"${v === labels.mark ? ' selected' : ''}>${esc(m.mark)} · seq ${esc(m.sequence || '—')} · ${num(m.count)} pc${m.count === 1 ? '' : 's'}</option>`;
+  }).join('');
+  const rows = labels.pieces.map((p) => `<tr>
+      <td><label class="check"><input type="checkbox" data-labels-piece="${esc(p.code)}"${labels.unticked.has(p.code) ? '' : ' checked'}> <code>${esc(p.code)}</code></label></td>
+      <td class="num" data-v="${p.index}">${p.index} of ${p.of}</td>
+      <td class="wrap">${esc(p.description ?? '')}</td>
+      <td class="num" data-v="${p.weight ?? ''}">${p.weight == null ? '' : lbs(p.weight)}</td></tr>`).join('');
+  return `<div class="label-form"><label>Assembly (mark) <select id="labels-mark"><option value="">Pick one…</option>${opts}</select></label></div>
+    ${labels.pieces.length ? `<p class="codes-actions"><button class="btn" type="button" data-labels-tick="all">Tick all</button> <button class="btn" type="button" data-labels-tick="none">Tick none</button></p>
+    <div class="table-wrap"><table class="small"><thead><tr><th>Barcode</th><th>Qty</th><th>Description</th><th>Weight</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+}
+
+// Redraws the sheet grid, the summary and the Print button in place (no page redraw).
+function labelsRefresh() {
+  const grid = $('#sheet-picker');
+  if (!grid) return;
+  const count = labelsCount();
+  const spots = labelsPlace(count);
+  const onFirst = new Map(spots.filter((s) => s.sheet === 0).map((s, i) => [s.pos, i + 1]));
+  grid.innerHTML = Array.from({ length: SHEET }, (_, i) => i + 1).map((p) => {
+    const cls = labels.used.has(p) ? 'used' : labels.skip.has(p) ? 'skip' : onFirst.has(p) ? 'print' : 'free';
+    const text = cls === 'print' ? `#${onFirst.get(p)}` : cls === 'used' ? 'used' : cls === 'skip' ? 'empty' : p;
+    return `<button type="button" class="slot ${cls}" data-pos="${p}" title="Position ${p}">${text}</button>`;
+  }).join('');
+  const sheets = spots.length ? spots.at(-1).sheet + 1 : 0;
+  const free = labelsFree().length;
+  $('#labels-summary').textContent = count
+    ? `${num(count)} label${count === 1 ? '' : 's'}: ${Math.min(count, free || SHEET)} on this sheet${sheets > 1 ? `, then ${num(sheets - 1)} new sheet${sheets === 2 ? '' : 's'}` : ''}. ${free} free position${free === 1 ? '' : 's'} on this sheet.`
+    : labels.mode === 'mark' && !labels.mark ? 'Pick an assembly.' : 'Nothing picked to print.';
+  const btn = $('[data-labels-print]');
+  btn.disabled = !count;
+  btn.textContent = count ? `Print ${num(count)} label${count === 1 ? '' : 's'}` : 'Print';
+}
+
+function labelsAfterPrintHtml() {
+  return `<div class="notice"><p>The sheet opened in a new tab. Print it at <b>100 %</b> (no fit to page, margins none).</p>
+    <p>Printed OK? Then the positions it used are marked used for next time.
+    <button class="btn primary" type="button" data-labels-printed>Yes, it printed</button>
+    <button class="btn" type="button" data-labels-forget>No</button></p></div>`;
+}
+
 async function printLabels(btn) {
-  const sel = $('#labels-mark');
-  const opt = sel?.selectedOptions?.[0];
-  const q = new URLSearchParams();
-  if (sel?.value) { q.set('mark', sel.value); q.set('seq', opt.dataset.seq ?? ''); }
-  if (labelsUsed.size) q.set('skip', [...labelsUsed].join(','));
+  const count = labelsCount();
+  if (!count) return;
+  const positions = labelsFree();
+  const body = { positions };
+  if (labels.mode === 'mark') {
+    const [mark, seq] = labels.mark.split('|');
+    if (labels.unticked.size) body.codes = labels.pieces.filter((p) => !labels.unticked.has(p.code)).map((p) => p.code);
+    else Object.assign(body, { mark, seq });
+  } else if (labels.mode === 'codes') body.codes = labelsCodeList();
   const out = $('#labels-out');
+  // Opened now, while the tap still counts, so the browser doesn't block it; filled in below.
+  const tab = window.open('', '_blank');
   btn.disabled = true;
   out.innerHTML = '<p class="muted">Making the sheet…</p>';
   try {
-    const html = await api(`/jobs/${enc(labelsJob)}/labels/sheet?${q}`);
+    const html = await api(`/admin/jobs/${enc(labels.job)}/labels/sheet`, { method: 'POST', body });
     const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-    if (!window.open(url, '_blank')) throw new Error('The browser blocked the new tab. Allow pop-ups for this site, then press Print again.');
-    out.innerHTML = '<p class="ok-text">The sheet opened in a new tab. Print it at 100 %, with no fit to page.</p>';
+    if (tab) tab.location.href = url;
+    else if (!window.open(url, '_blank')) throw new Error('The browser blocked the new tab. Allow pop-ups for this site, then press Print again.');
+    // What the sheet in the printer looks like after this print (the last sheet it used).
+    const spots = labelsPlace(count);
+    const lastSheet = spots.at(-1).sheet;
+    const onLast = spots.filter((s) => s.sheet === lastSheet).map((s) => s.pos);
+    labels.last = { used: lastSheet === 0 ? [...labels.used, ...onLast] : onLast };
+    out.innerHTML = labelsAfterPrintHtml();
   } catch (err) {
+    tab?.close();
     out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
   } finally {
     btn.disabled = false;
   }
+}
+
+async function saveLabelSheet(used) {
+  const saved = await api('/admin/labels/sheet-state', { method: 'PUT', body: { used } });
+  labels.used = new Set(saved.used);
+  labels.skip = new Set();
+  labels.last = null;
+  $('#labels-out').innerHTML = '';
+  labelsRefresh();
+}
+
+// Clicks, changes and typing on the Labels page. True when the event was one of its own.
+async function labelsClick(t) {
+  if (currentPage !== 'labels') return false;
+  const mode = t.closest('[data-labels-mode]');
+  if (mode) { labels.mode = mode.dataset.labelsMode; redrawReason = 'live'; draw(); return true; }
+  const tap = t.closest('[data-labels-tap]');
+  if (tap) {
+    labels.tapMeans = tap.dataset.labelsTap;
+    document.querySelectorAll('[data-labels-tap]').forEach((b) => b.classList.toggle('on', b === tap));
+    return true;
+  }
+  const slot = t.closest('#sheet-picker [data-pos]');
+  if (slot) {
+    const p = Number(slot.dataset.pos);
+    if (labels.used.has(p)) {
+      labels.used.delete(p);
+      await saveLabelSheet([...labels.used]);
+    } else if (labels.skip.has(p)) labels.skip.delete(p);
+    else if (labels.tapMeans === 'skip') labels.skip.add(p);
+    else await saveLabelSheet([...labels.used, p]);
+    labelsRefresh();
+    return true;
+  }
+  const tick = t.closest('[data-labels-tick]');
+  if (tick) {
+    labels.unticked = tick.dataset.labelsTick === 'all' ? new Set() : new Set(labels.pieces.map((p) => p.code));
+    document.querySelectorAll('[data-labels-piece]').forEach((c) => { c.checked = !labels.unticked.has(c.dataset.labelsPiece); });
+    labelsRefresh();
+    return true;
+  }
+  if (t.closest('[data-labels-print]')) { printLabels(t.closest('[data-labels-print]')); return true; }
+  if (t.closest('[data-labels-new-sheet]')) { await saveLabelSheet([]); return true; }
+  if (t.closest('[data-labels-printed]')) { await saveLabelSheet(labels.last?.used ?? [...labels.used]); return true; }
+  if (t.closest('[data-labels-forget]')) { labels.last = null; $('#labels-out').innerHTML = ''; return true; }
+  return false;
+}
+
+async function labelsChange(el) {
+  if (el.id === 'labels-job') { location.hash = `#/labels?job=${enc(el.value)}`; return true; }
+  if (el.id === 'labels-mark') {
+    labels.mark = el.value;
+    labels.pieces = [];
+    labels.unticked = new Set();
+    redrawReason = 'live';
+    draw();
+    return true;
+  }
+  if (el.matches('[data-labels-piece]')) {
+    if (el.checked) labels.unticked.delete(el.dataset.labelsPiece); else labels.unticked.add(el.dataset.labelsPiece);
+    labelsRefresh();
+    return true;
+  }
+  return false;
+}
+
+function labelsInput(el) {
+  if (el.id !== 'labels-codes') return false;
+  labels.codesText = el.value;
+  labelsRefresh();
+  return true;
 }
 
 // ---- Sortable tables: every table on the board; a click on a heading sorts it ------------------

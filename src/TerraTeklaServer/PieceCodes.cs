@@ -50,7 +50,6 @@ public sealed record CodesAdded(int Added, int Updated, int Unchanged, List<Code
 /// <summary>A code already paired with another mark.</summary>
 public sealed record CodeConflict(string Code, string Mark, string Wanted);
 
-/// <summary>One line of a pasted or imported code list.</summary>
 /// <summary>One line of a pasted or imported code list. <c>Status</c> is the piece's status in the list
 /// it came from (for example "Fabrication Complete"), shown when it is scanned; null keeps the one on file.</summary>
 public sealed record CodeLine(string Code, string Mark, string? Sequence, string? Status = null, string? Description = null, double? Weight = null);
@@ -67,18 +66,19 @@ public static class CodeList
 
     /// <summary>
     /// Reads a code list. Either an export with a first line naming its columns (for example the
-    /// facility portal's "Status, Sequence, Assembly, Barcode, ..."): the code, mark, sequence and
-    /// status columns are found by name and the rest is ignored. Or a plain list, one code per line,
-    /// "code, mark" or "code, mark, sequence". Commas, tabs or semicolons separate values (a
-    /// spreadsheet copy works); a value in double quotes may hold any of them. Blank lines are
-    /// skipped. Returns the lines read and what was wrong with the others.
+    /// facility portal's "Status, Sequence, Assembly, Barcode, ..."): the code, mark, sequence,
+    /// status, description and weight (lbs) columns are found by name and the rest is ignored. Or a
+    /// plain list, one code per line, "code, mark", "code, mark, sequence" or
+    /// "code, mark, sequence, description, weight". The description and weight are printed on labels.
+    /// Commas, tabs or semicolons separate values (a spreadsheet copy works); a value in double
+    /// quotes may hold any of them. Blank lines are skipped. Returns the lines read and what was wrong with the others.
     /// </summary>
     public static (List<CodeLine> Lines, List<string> Errors) Parse(string text)
     {
         var lines = new List<CodeLine>();
         var errors = new List<string>();
         var rows = (text ?? "").TrimStart('\uFEFF').Split('\n');
-        int code = 0, mark = 1, seq = 2, status = -1, desc = -1, weight = -1;
+        int code = 0, mark = 1, seq = 2, status = -1, desc = 3, weight = 4;
         var n = 0;
         var first = true;
         foreach (var raw in rows)
@@ -120,7 +120,7 @@ public static class CodeList
                 errors.Add($"Line {n}: too long.");
                 continue;
             }
-            var w = double.TryParse(wv, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var kg) ? kg : (double?)null;
+            var w = double.TryParse(wv.Replace("lbs", "", StringComparison.OrdinalIgnoreCase).Replace("lb", "", StringComparison.OrdinalIgnoreCase).Trim(' ', '#'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lbs) ? lbs : (double?)null;
             lines.Add(new CodeLine(cv, CleanMark(mv), sv == "" ? null : sv, st == "" ? null : st, dv == "" ? null : Short(dv, 120), w));
         }
         return (lines, errors);

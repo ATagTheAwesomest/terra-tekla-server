@@ -40,6 +40,7 @@ iPads / admin page ──HTTPS──► terra-tekla-server ──► tekla-conve
 - [docs/JOB-BOM.md](docs/JOB-BOM.md): a slot per job for its BOM workbook (transmittals, due dates, paint).
 - [docs/SPEED.md](docs/SPEED.md): what makes scans slow, how reads are shared, and the Speed timings
   on the admin board's Server page.
+- [docs/LABELS.md](docs/LABELS.md): printing piece labels (Avery 5160, Code 128) from the admin board's Labels tab.
 - [docs/MIGRATION.md](docs/MIGRATION.md): moving from the old setup (conversion layer on the internet,
   app on GitHub Pages) to this server: `windows\migrate-from-conversion-layer.ps1`, the Cloudflare
   hostname, paths and settings, Cloudflare Access, the iPads and the admin board, what data carries over.
