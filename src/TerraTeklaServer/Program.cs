@@ -774,32 +774,8 @@ admin.MapDelete("/jobs/{job}/codes/powerfab", async (string job, IHttpClientFact
     return Results.Json(new { cleared, failed }, Json.Options);
 });
 
-// Piece labels (Labels.cs): the marks of a job with their pieces, for the Labels tab's picker, and the
-// printable sheet. skip = the positions (1-30, row by row) already used on the first sheet, e.g. "1,2,7".
-admin.MapGet("/jobs/{job}/labels/marks", (string job) =>
-{
-    var rows = store.Codes(job)
-        .GroupBy(c => (Mark: CodeList.CleanMark(c.Mark), Seq: c.Sequence?.Trim() ?? ""))
-        .OrderBy(g => g.Key.Mark, StringComparer.OrdinalIgnoreCase).ThenBy(g => g.Key.Seq, StringComparer.Ordinal)
-        .Select(g => new { mark = g.Key.Mark, sequence = g.Key.Seq, count = g.Count(), withWeight = g.Count(c => c.Weight is not null), withDescription = g.Count(c => c.Description is not null) });
-    return Results.Json(new { job, marks = rows, total = store.CodeCount(job) }, Json.Options);
-});
-
-admin.MapGet("/jobs/{job}/labels/sheet", (string job, string? mark, string? seq, string? skip) =>
-{
-    var positions = new HashSet<int>();
-    foreach (var part in (skip ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-    {
-        if (!int.TryParse(part, out var n) || n < 1 || n > Labels.PerSheet)
-            return Results.Problem($"A label position is 1 to {Labels.PerSheet}, not \"{part}\".", statusCode: 400);
-        positions.Add(n - 1);
-    }
-    var labels = Labels.For(job, store.Codes(job), mark, seq);
-    if (labels.Count == 0)
-        return Results.Problem("No labels: this job has no piece codes for that mark and sequence.", statusCode: 404);
-    var title = $"Labels {job}" + (mark is null ? "" : $" {CodeList.CleanMark(mark)}") + (seq is null ? "" : $" seq {seq}");
-    return Results.Content(Labels.Sheet(job, labels, positions, title), "text/html; charset=utf-8");
-});
+// Piece labels for the admin board's Labels tab (Labels.cs, LabelsApi.cs, docs/LABELS.md).
+LabelsApi.Map(admin, store);
 
 admin.MapGet("/boms", () => store.BomJobs().Select(j => new { job = j.Job, info = j.Info }));
 
@@ -1430,6 +1406,7 @@ static string? Doc(string name)
         "codes" => "docs.PIECE-CODES.md",
         "bom" => "docs.JOB-BOM.md",
         "speed" => "docs.SPEED.md",
+        "labels" => "docs.LABELS.md",
         _ => null,
     };
     if (resource is null)

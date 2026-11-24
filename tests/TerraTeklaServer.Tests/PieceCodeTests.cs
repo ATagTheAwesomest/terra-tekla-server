@@ -128,9 +128,9 @@ public sealed class PieceCodeTests : IDisposable
         var (lines, errors) = CodeList.Parse(Export);
         Assert.Empty(errors);
         Assert.Equal([
-            new CodeLine("C9227621Q1", "10121601", "1012", "Not started"),
-            new CodeLine("C9227623Q1", "10124520", "1012", "Not started"),
-            new CodeLine("C9227624Q1", "10124520", "1012", "Shipped to treatment")], lines);
+            new CodeLine("C9227621Q1", "10121601", "1012", "Not started", "HSS 6X6X1/2 A500C", 897.187),
+            new CodeLine("C9227623Q1", "10124520", "1012", "Not started", "HSS 6X6X1/2 A500C", 350.747),
+            new CodeLine("C9227624Q1", "10124520", "1012", "Shipped to treatment", "HSS 6X6X1/2, A500C", 350.747)], lines);
         Assert.Equal(@"^C\d{7}Q\d$", CodeList.SuggestPattern(lines));
         Assert.Null(CodeList.SuggestPattern([new CodeLine("AB12", "M", null), new CodeLine("1234", "M", null)]));
         var (_, bad) = CodeList.Parse("Status,Barcode,Description\nNot started,C9227621Q1,x\n");
