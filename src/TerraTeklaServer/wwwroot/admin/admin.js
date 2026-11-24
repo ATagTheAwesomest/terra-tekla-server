@@ -571,7 +571,73 @@ async function codesPanel(job) {
     <p class="codes-actions"><button class="btn primary" type="button" data-codes-import${off}>Add to the list</button>
       <button class="btn" type="button" data-codes-clear${off || (r.count ? '' : ' disabled')}>Remove all ${num(r.count)} codes</button></p>
     <div id="codes-out"></div>
+    <h3>Write codes into PowerFab</h3>
+    <p class="muted">Puts each code into one piece’s <b>Instance location</b> in PowerFab (the only per-piece field PowerFab’s API can write; cost code, remarks and user fields can’t be changed through it). A mark with 9 pieces in a sequence gets its 9 codes on instances 1 to 9. Nothing changes in PowerFab until you press Write. If your shop uses instance location for yard locations, don’t use this.</p>
+    <p class="codes-actions"><button class="btn" type="button" data-slot-preview${off || (r.count ? '' : ' disabled')}>Preview</button>
+      <button class="btn" type="button" data-slot-clear${off}>Clear the codes written</button></p>
+    <div id="slot-out"></div>
   </section>`;
+}
+
+// Writing piece codes into PowerFab's instance location (PowerFabSlot.cs on the server).
+async function previewSlot() {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#slot-out');
+  out.innerHTML = '<p class="muted">Reading the job’s assemblies from PowerFab…</p>';
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes/powerfab`);
+    let html = `<p class="ok-text">${num(r.writeCount)} code${r.writeCount === 1 ? '' : 's'} to write · ${num(r.doneCount)} already in PowerFab · ${num(r.skippedCount)} can’t be written. PowerFab has ${num(r.assemblies)} mark/sequence${r.assemblies === 1 ? '' : 's'} on job ${esc(job)}.</p>`;
+    if (r.writeCount) {
+      html += `<div style="overflow-x:auto;max-height:24rem"><table><thead><tr><th>Code</th><th>Mark</th><th>Seq</th><th>Piece</th></tr></thead><tbody>${r.write.map((w) => `<tr><td><code>${esc(w.code)}</code></td><td>${esc(w.mainMark)}</td><td>${esc(w.sequence)}</td><td>${w.instance}</td></tr>`).join('')}</tbody></table></div>`;
+      if (r.writeCount > r.write.length) html += `<p class="muted">…and ${num(r.writeCount - r.write.length)} more.</p>`;
+      const now = Math.min(r.writeCount, r.maxPerRun);
+      html += `<p><button class="btn primary" type="button" data-slot-write="${r.writeCount}">Write ${num(now)} code${now === 1 ? '' : 's'} into PowerFab</button>${r.writeCount > now ? ` <span class="muted">(${num(r.maxPerRun)} per press; press again for the rest)</span>` : ''}</p>`;
+    }
+    if (r.skippedCount) html += `<p class="error">Can’t be written:</p><ul>${r.skipped.map((k) => `<li><code>${esc(k.code)}</code>: ${esc(k.reason)}</li>`).join('')}</ul>${r.skippedCount > r.skipped.length ? `<p class="muted">…and ${num(r.skippedCount - r.skipped.length)} more.</p>` : ''}`;
+    out.innerHTML = html;
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+async function writeSlot(btn) {
+  const job = $('#codes-panel').dataset.codesJob;
+  const out = $('#slot-out');
+  btn.disabled = true;
+  out.innerHTML = '<p class="muted">Writing into PowerFab, one code at a time…</p>';
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes/powerfab`, { method: 'POST', body: { expected: Number(btn.dataset.slotWrite) } });
+    let html = `<p class="ok-text">Wrote ${num(r.written)} code${r.written === 1 ? '' : 's'} into PowerFab.${r.left > 0 ? ` ${num(r.left)} left: press Preview again.` : ''}</p>`;
+    if (r.failed.length) html += `<p class="error">PowerFab refused ${num(r.failed.length)}${r.stopped ? ' (stopped after 3 in a row)' : ''}:</p><ul>${r.failed.map((f) => `<li><code>${esc(f.code)}</code> (${esc(f.mark)}, seq ${esc(f.sequence)}, piece ${f.instance}): ${esc(f.error)}</li>`).join('')}</ul>`;
+    out.innerHTML = html;
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+async function clearSlot(btn) {
+  const job = $('#codes-panel').dataset.codesJob;
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Press again to clear them in PowerFab';
+    setTimeout(() => { btn.dataset.armed = ''; btn.textContent = 'Clear the codes written'; }, 4000);
+    return;
+  }
+  const out = $('#slot-out');
+  btn.disabled = true;
+  out.innerHTML = '<p class="muted">Clearing…</p>';
+  try {
+    const r = await api(`/admin/jobs/${enc(job)}/codes/powerfab`, { method: 'DELETE' });
+    let html = `<p class="ok-text">Cleared ${num(r.cleared)} piece${r.cleared === 1 ? '' : 's'} in PowerFab.</p>`;
+    if (r.failed.length) html += `<p class="error">PowerFab refused: ${r.failed.map((f) => `${esc(f.code)}: ${esc(f.error)}`).join('; ')}</p>`;
+    out.innerHTML = html;
+  } catch (err) {
+    out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+    btn.dataset.armed = '';
+    btn.textContent = 'Clear the codes written';
+  }
 }
 
 async function saveCodeSettings() {
@@ -1675,6 +1741,9 @@ function bind() {
       return;
     }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
+    if (t.closest('[data-slot-preview]')) { previewSlot(); return; }
+    if (t.closest('[data-slot-write]')) { writeSlot(t.closest('[data-slot-write]')); return; }
+    if (t.closest('[data-slot-clear]')) { clearSlot(t.closest('[data-slot-clear]')); return; }
     if (t.closest('[data-bom-clear]')) { clearBom(t.closest('[data-bom-clear]')); return; }
     if (t.closest('[data-codes-clear]')) { clearCodes(t.closest('[data-codes-clear]')); return; }
     if (t.closest('[data-codes-pattern]')) { $('#codes-pattern').value = t.closest('[data-codes-pattern]').dataset.codesPattern; saveCodeSettings(); return; }
