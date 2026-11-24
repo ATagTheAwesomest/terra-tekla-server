@@ -458,7 +458,7 @@ async function pageJobs() {
     ${r.jobs.map((j) => `<tr class="${j.inPowerFab ? '' : 'not-pf'}" data-search="${esc(`${j.job} ${j.description} ${j.location}`.toLowerCase())}">
       <td><a href="#/job/${enc(j.job)}"><b>${esc(j.job)}</b></a>${j.inPowerFab ? '' : ' <span class="pill warn" title="The server has stacks, piece codes or a BOM for it, but PowerFab didn’t list it">not in PowerFab</span>'}</td>
       <td>${esc(j.description)}</td><td>${esc(j.location)}</td>
-      <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
+      <td class="num">${j.loads || ''}</td><td class="num">${j.pieces || ''}</td><td data-v="${esc(j.lastAt ?? '')}">${j.lastAt ? esc(ago(j.lastAt)) : ''}</td>
       ${r.photosEnabled ? `<td class="path">${j.photoError ? `<span class="error">${esc(j.photoError)}</span>` : `${esc(j.photoFolder ?? '')}<br><span class="muted">${j.photoRule === 'default' ? 'default' : `rule ${esc(j.photoRule ?? '')}`}</span>`}</td>` : ''}
     </tr>`).join('')}
     </tbody></table></div>` : '<p class="muted">No jobs.</p>'}
@@ -474,14 +474,14 @@ function filterJobs() {
 async function pageJob(job) {
   const [loads, items] = await Promise.all([api(`/jobs/${enc(job)}/loads`), api(`/activity?job=${enc(job)}&limit=${RECENT}`)]);
   return `<p class="crumbs"><a href="#/jobs">Jobs</a> › ${esc(job)}</p>
-  <div class="grid">
+  <div class="grid wide-left">
     <section class="panel"><h1>Job ${esc(job)}</h1>
       <p class="muted">Loads the iPads have opened. PowerFab itself has the full list.</p>
-      ${loads.length ? `<table><thead><tr><th>Load</th><th class="num">Stacks</th><th class="num">Pieces</th><th class="num">Weight</th><th>Truck check</th><th>Changed</th></tr></thead><tbody>
+      ${loads.length ? `<div class="table-wrap"><table><thead><tr><th>Load</th><th class="num">Stacks</th><th class="num">Pieces</th><th class="num">Weight</th><th>Truck check</th><th>Changed</th></tr></thead><tbody>
       ${loads.map((l) => {
         const t = loadTotals(l);
-        return `<tr><td><a href="#/load/${enc(l.loadId)}"><b>Load ${esc(l.loadNumber)}</b></a></td><td class="num">${l.stacks.length}</td><td class="num">${t.pieces}</td><td class="num">${lbs(t.weight)}</td><td>${checkPill(l)}</td><td>${esc(ago(l.updatedAt))}</td></tr>`;
-      }).join('')}</tbody></table>` : '<p class="muted">No loads yet.</p>'}
+        return `<tr><td><a href="#/load/${enc(l.loadId)}"><b>Load ${esc(l.loadNumber)}</b></a></td><td class="num">${l.stacks.length}</td><td class="num">${t.pieces}</td><td class="num">${lbs(t.weight)}</td><td>${checkPill(l)}</td><td data-v="${esc(l.updatedAt ?? '')}">${esc(ago(l.updatedAt))}</td></tr>`;
+      }).join('')}</tbody></table></div>` : '<p class="muted">No loads yet.</p>'}
     </section>
     <section class="panel"><h2>Activity on ${esc(job)}</h2><div data-feed>${recent(items, `job=${enc(job)}`)}</div></section>
   </div>
@@ -724,7 +724,7 @@ async function pageLoad(loadId, query) {
         return `<tr class="${e.pending ? 'pending' : ''}${e.manual ? ' manual' : ''}">
           <td>${i + 1}</td><td class="mark"><a href="#/mark/${enc(e.mark)}?job=${enc(state.job)}">${esc(e.mark)}</a>${e.code ? `<br><span class="muted code">${esc(e.code)}</span>` : ''}</td><td>${esc(e.sequence)}</td>
           <td>${e.pending ? 'Waiting on PowerFab…' : e.removing ? 'Being taken off…' : esc(e.description ?? '')}${e.manual ? ' <span class="pill warn">typed</span>' : ''}</td>
-          <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td>${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
+          <td class="num">${lbs(e.weight)}</td><td>${who(e.scannedBy)}</td><td data-v="${esc(e.scannedAt ?? '')}">${e.scannedAt ? esc(when(e.scannedAt)) : '<span class="muted">loaded in PowerFab</span>'}</td>
           ${state.truckCheck ? `<td>${scan ? `✓ ${who(scan.scannedBy, 'solo')}` : ''}</td>` : ''}</tr>`;
       }).join('')}</tbody></table>` : '<p class="muted" style="padding:.5rem .85rem">Empty.</p>'}
     </section>`;
@@ -744,7 +744,7 @@ async function pageLoad(loadId, query) {
       </section>
       ${health?.photosEnabled ? `<section class="panel"><h2>Photos</h2>${await photoGrid(photoList.slice().reverse(), { empty: 'No photos of this load.' })}</section>` : ''}
     </div>
-    <section class="panel"><h2>Activity on this load</h2><div data-feed>${recent(items, `load=${enc(loadId)}`)}</div></section>
+    <section class="panel"><h2>Activity on this load</h2><div data-feed>${recent(items, `load=${enc(loadId)}&loadNumber=${enc(state.loadNumber)}`)}</div></section>
   </div>`;
 }
 
@@ -786,7 +786,7 @@ async function pagePhotos([job, load] = [], query = new URLSearchParams()) {
       <section class="panel"><h2>Job ${esc(job)} <span class="muted">· ${r.loads.length} load${r.loads.length === 1 ? '' : 's'} with photos</span></h2>
         <p class="muted path">Stored in ${esc(r.folder ?? '')}</p>
         ${r.loads.length ? `<table><thead><tr><th>Load</th><th class="num">Photos</th><th>Last photo</th><th>Folder</th></tr></thead><tbody>
-          ${r.loads.map((l) => `<tr><td><a href="#/photos/${enc(job)}/${enc(l.load)}"><b>Load ${esc(l.load)}</b></a></td><td class="num">${num(l.photos)}</td><td>${l.lastAt ? esc(ago(l.lastAt)) : ''}</td><td class="path">${esc(l.folder ?? '')}</td></tr>`).join('')}
+          ${r.loads.map((l) => `<tr><td><a href="#/photos/${enc(job)}/${enc(l.load)}"><b>Load ${esc(l.load)}</b></a></td><td class="num">${num(l.photos)}</td><td data-v="${esc(l.lastAt ?? '')}">${l.lastAt ? esc(ago(l.lastAt)) : ''}</td><td class="path">${esc(l.folder ?? '')}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No photos for this job.</p>'}</section>`;
   }
   if (query.get('view') === 'newest') {
@@ -804,7 +804,7 @@ async function pagePhotos([job, load] = [], query = new URLSearchParams()) {
       <p class="muted">Every job with photos in its folder. Pick one, then a load. The iPads have the same explorer (home screen › Photos), look only.</p>
       <input class="filter" type="search" id="photo-job-filter" placeholder="Filter jobs" value="${esc(photoJobFilter)}" autocomplete="off">
       ${r.jobs.length ? `<div style="overflow-x:auto"><table id="photo-jobs-table"><thead><tr><th>Job</th><th>Description</th><th class="num">Loads</th><th class="num">Photos</th><th>Last photo</th><th>Folder</th></tr></thead><tbody>
-        ${r.jobs.map((j) => `<tr data-search="${esc(`${j.job} ${j.description}`.toLowerCase())}"><td><a href="#/photos/${enc(j.job)}"><b>${esc(j.job)}</b></a></td><td>${esc(j.description)}</td><td class="num">${num(j.loads)}</td><td class="num">${num(j.photos)}</td><td>${j.lastAt ? esc(ago(j.lastAt)) : ''}</td><td class="path">${esc(j.folder ?? '')}</td></tr>`).join('')}
+        ${r.jobs.map((j) => `<tr data-search="${esc(`${j.job} ${j.description}`.toLowerCase())}"><td><a href="#/photos/${enc(j.job)}"><b>${esc(j.job)}</b></a></td><td>${esc(j.description)}</td><td class="num">${num(j.loads)}</td><td class="num">${num(j.photos)}</td><td data-v="${esc(j.lastAt ?? '')}">${j.lastAt ? esc(ago(j.lastAt)) : ''}</td><td class="path">${esc(j.folder ?? '')}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">No photos yet.</p>'}
     </section>
     <section class="panel"><h2>Latest taken <span class="muted">· <a href="#/photos?view=newest">all, newest first ›</a></span></h2>${await photoGrid(recent.photos, { deletable: true })}</section>`;
@@ -1088,10 +1088,10 @@ function speedPanel(pf, scans) {
         <h3>Scans on each device</h3>
         <p class="muted">From the scan on the device to PowerFab having it loaded. “Waited” is time spent behind the scans before it.</p>
         ${devs.length ? `<table><thead><tr><th>Device</th><th class="num">Scans</th><th class="num">Average</th><th class="num">Slowest</th><th class="num">Waited, avg</th><th>Last</th></tr></thead><tbody>
-          ${devs.map((d) => `<tr><td>${esc(d.device)}</td><td class="num">${num(d.scans)}</td><td class="num"${slow(d.averageMs)}>${msText(d.averageMs)}</td><td class="num"${slow(d.slowestMs)}>${msText(d.slowestMs)}</td><td class="num">${msText(d.averageWaitMs)}</td><td>${d.last ? esc(ago(d.last)) : ''}</td></tr>`).join('')}
+          ${devs.map((d) => `<tr><td>${esc(d.device)}</td><td class="num">${num(d.scans)}</td><td class="num"${slow(d.averageMs)}>${msText(d.averageMs)}</td><td class="num"${slow(d.slowestMs)}>${msText(d.slowestMs)}</td><td class="num">${msText(d.averageWaitMs)}</td><td data-v="${esc(d.last ?? '')}">${d.last ? esc(ago(d.last)) : ''}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No scan times yet (devices send them from app v0.26.0).</p>'}
         ${scans.newest?.length ? `<details><summary>Last ${scans.newest.length} scans</summary><table class="small"><thead><tr><th>When</th><th>Device</th><th>Mark</th><th class="num">Total</th><th class="num">Waited</th><th>Steps</th></tr></thead><tbody>
-          ${scans.newest.map((x) => `<tr><td>${x.at ? esc(when(x.at)) : ''}</td><td>${esc(x.device)}</td><td>${esc(x.mark ?? '')}${x.ok === false ? ` <span class="error" title="${esc(x.error ?? '')}">refused</span>` : ''}</td><td class="num"${slow(x.totalMs ?? 0)}>${x.totalMs == null ? '' : msText(x.totalMs)}</td><td class="num">${msText(x.waitMs ?? 0)}${x.ahead ? ` <span class="muted">(${x.ahead} ahead)</span>` : ''}</td><td class="muted">${(x.steps ?? []).map((st) => `${esc(st.name)} ${msText(st.ms)}`).join(' · ')}</td></tr>`).join('')}
+          ${scans.newest.map((x) => `<tr><td data-v="${esc(x.at ?? '')}">${x.at ? esc(when(x.at)) : ''}</td><td>${esc(x.device)}</td><td>${esc(x.mark ?? '')}${x.ok === false ? ` <span class="error" title="${esc(x.error ?? '')}">refused</span>` : ''}</td><td class="num"${slow(x.totalMs ?? 0)}>${x.totalMs == null ? '' : msText(x.totalMs)}</td><td class="num">${msText(x.waitMs ?? 0)}${x.ahead ? ` <span class="muted">(${x.ahead} ahead)</span>` : ''}</td><td class="muted">${(x.steps ?? []).map((st) => `${esc(st.name)} ${msText(st.ms)}`).join(' · ')}</td></tr>`).join('')}
         </tbody></table></details>` : ''}
       </div>
       <div>
@@ -1101,7 +1101,7 @@ function speedPanel(pf, scans) {
           ${pf.commands.map((c) => `<tr><td>${esc(c.command)}${c.errors ? ` <span class="error">${c.errors} failed</span>` : ''}</td><td class="num">${num(c.toPowerFab)}</td><td class="num">${num(c.sharedOrReused)}</td><td class="num"${slow(c.averageMs)}>${msText(c.averageMs)}</td><td class="num"${slow(c.slowestMs)}>${msText(c.slowestMs)}</td><td class="num">${bytes(c.averageBytes)}</td></tr>`).join('')}
         </tbody></table>` : '<p class="muted">No PowerFab calls yet.</p>'}
         ${pf.newest?.length ? `<details><summary>Last ${pf.newest.length} calls</summary><table class="small"><thead><tr><th>When</th><th>Command</th><th>Device</th><th class="num">Time</th><th class="num">Reply</th><th>How</th></tr></thead><tbody>
-          ${pf.newest.map((x) => `<tr><td>${esc(when(x.at))}</td><td>${esc(x.command)}${x.error || x.status >= 400 ? ` <span class="error" title="${esc(x.error ?? '')}">${x.status}</span>` : ''}</td><td>${esc(x.device ?? '')}</td><td class="num"${slow(x.ms)}>${msText(x.ms)}</td><td class="num">${bytes(x.bytes)}</td><td class="muted">${esc(x.how)}${x.waiting ? ` · ${x.waiting} ahead` : ''}</td></tr>`).join('')}
+          ${pf.newest.map((x) => `<tr><td data-v="${esc(x.at ?? '')}">${esc(when(x.at))}</td><td>${esc(x.command)}${x.error || x.status >= 400 ? ` <span class="error" title="${esc(x.error ?? '')}">${x.status}</span>` : ''}</td><td>${esc(x.device ?? '')}</td><td class="num"${slow(x.ms)}>${msText(x.ms)}</td><td class="num">${bytes(x.bytes)}</td><td class="muted">${esc(x.how)}${x.waiting ? ` · ${x.waiting} ahead` : ''}</td></tr>`).join('')}
         </tbody></table></details>` : ''}
       </div>
     </div>
@@ -1151,7 +1151,7 @@ async function pageServer() {
       </section>
       <section class="panel"><h2>iPads, last 7 days</h2>
         ${d.byDevice.length ? `<table><thead><tr><th>iPad</th><th class="num">Scans today</th><th class="num">7 days</th><th>Last scan</th></tr></thead><tbody>
-        ${d.byDevice.map((x) => `<tr><td>${who(x.deviceId, x.deviceName)}</td><td class="num">${num(x.today)}</td><td class="num">${num(x.week)}</td><td>${x.lastAt ? esc(ago(x.lastAt)) : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No scans in the last 7 days.</p>'}
+        ${d.byDevice.map((x) => `<tr><td>${who(x.deviceId, x.deviceName)}</td><td class="num">${num(x.today)}</td><td class="num">${num(x.week)}</td><td data-v="${esc(x.lastAt ?? '')}">${x.lastAt ? esc(ago(x.lastAt)) : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">No scans in the last 7 days.</p>'}
       </section>
       <section class="panel"><h2>What happened, last 7 days</h2>
         ${d.kinds.length ? `<table><tbody>${d.kinds.map((k) => `<tr><td><span class="kind ${esc(k.kind)}">${esc(k.kind.replace('-', ' '))}</span></td><td class="num">${num(k.count)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nothing.</p>'}
@@ -1544,6 +1544,7 @@ async function draw() {
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active',
     a.dataset.nav === (page === '' || page === 'device' || page === 'history' ? 'home' : ['job', 'load', 'mark'].includes(page) ? 'jobs' : page)));
   if (redrawReason === 'nav') newestShown = NEWEST_PAGE; // "Show more" stays through live redraws only
+  if (redrawReason === 'nav') filterState.clear(); // a table's filter box is for the page it was typed on
   grids.clear();
   currentPage = page;
   try {
@@ -1739,9 +1740,20 @@ function bind() {
     const rows = $('#codes-text').value.split('\n').filter((l) => l.trim()).length;
     $('#codes-out').innerHTML = `<p class="muted">${esc(file.name)}: ${num(Math.max(rows - 1, 0))} rows read. Press “Add to the list”.</p>`;
   });
+  // Sortable headings work from the keyboard too.
+  $('#main').addEventListener('keydown', (e) => {
+    const th = e.target.closest?.('table.sortable thead th');
+    if (th && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); sortByHeading(th); }
+  });
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'job-filter') { jobFilter = e.target.value; filterJobs(); }
     if (e.target.id === 'photo-job-filter') { photoJobFilter = e.target.value; filterPhotoJobs(); }
+    const tf = e.target.closest?.('[data-table-filter]');
+    if (tf) {
+      filterState.set(tf.dataset.tableFilter, tf.value);
+      const table = document.querySelector(`table[data-table-key="${tf.dataset.tableFilter}"]`);
+      if (table) filterTable(table, tf.value);
+    }
   });
   $('#main').addEventListener('click', async (e) => {
     const t = e.target;
@@ -1774,15 +1786,20 @@ function bind() {
     if (histMore) {
       histMore.disabled = true;
       const filter = histMore.dataset.histFilter;
-      const older = await api(`/activity?${filter ? `${filter}&` : ''}before=${histMore.dataset.histMore}&limit=100`);
-      const tbody = document.querySelector('#history-table tbody');
-      if (tbody) tbody.insertAdjacentHTML('beforeend', older.map(historyRow).join(''));
-      if (older.length >= 100) histMore.dataset.histMore = older.at(-1).id;
-      else histMore.remove();
-      histMore.disabled = false;
-      enhanceTables($('#main'), currentPage);
+      try {
+        const older = await api(`/activity?${filter ? `${filter}&` : ''}before=${histMore.dataset.histMore}&limit=${HISTORY_PAGE}`);
+        if (historyOlder.filter !== filter) historyOlder = { filter, items: [], done: false };
+        historyOlder.items.push(...older);
+        historyOlder.done = older.length < HISTORY_PAGE;
+        redrawReason = 'live';
+        draw();
+      } catch (err) {
+        histMore.disabled = false;
+        histMore.textContent = err.message;
+      }
       return;
     }
+    if (t.closest('[data-hist-csv]')) { historyCsv(); return; }
     if (t.closest('[data-codes-import]')) { importCodes(); return; }
     if (t.closest('[data-slot-preview]')) { previewSlot(); return; }
     if (t.closest('[data-slot-write]')) { writeSlot(t.closest('[data-slot-write]')); return; }
@@ -1946,7 +1963,7 @@ function bind() {
 
 // ---- Recent activity: a short list on each page, the rest on the History page ----------------
 
-const RECENT = 12;
+const RECENT = 10;
 
 // The last few lines of an activity list, and a link to all of it (History page, same filter).
 function recent(items, filter) {
@@ -1973,19 +1990,63 @@ function historyFilter(query) {
   return ['device', 'job', 'load', 'mark'].filter((k) => query.get(k)).map((k) => `${k}=${enc(query.get(k))}`).join('&');
 }
 
+// Lines already pulled in with "Show older", kept through live redraws of the same History page.
+const HISTORY_PAGE = 200;
+let historyOlder = { filter: null, items: [], done: false };
+
+function historyTitle(query) {
+  const parts = [];
+  if (query.get('device')) parts.push(deviceOf(query.get('device'))?.name ?? 'a removed device');
+  if (query.get('job')) parts.push(`Job ${query.get('job')}`);
+  if (query.get('load')) parts.push(`Load ${query.get('loadNumber') ?? ''}`.trim());
+  if (query.get('mark')) parts.push(query.get('mark'));
+  return parts.join(' · ');
+}
+
+// Where "‹ Back" on the History page goes: the page its "All history" link was on.
+function historyBack(query) {
+  if (query.get('device')) return [`#/device/${enc(query.get('device'))}`, deviceOf(query.get('device'))?.name ?? 'Device'];
+  if (query.get('mark')) return [`#/mark/${enc(query.get('mark'))}${query.get('job') ? `?job=${enc(query.get('job'))}` : ''}`, query.get('mark')];
+  if (query.get('load')) return [`#/load/${enc(query.get('load'))}`, `Load ${query.get('loadNumber') ?? ''}`.trim()];
+  if (query.get('job')) return [`#/job/${enc(query.get('job'))}`, `Job ${query.get('job')}`];
+  return ['#/', 'Devices & activity'];
+}
+
 async function pageHistory(query) {
   const filter = historyFilter(query);
-  const items = await api(`/activity?${filter ? `${filter}&` : ''}limit=100`);
-  const what = [...query.entries()].filter(([k]) => ['device', 'job', 'load', 'mark'].includes(k)).map(([k, v]) => `${k} ${v}`).join(', ') || 'everything';
-  return `<p class="crumbs"><a href="#/">Devices &amp; activity</a> › History</p>
-    <section class="panel"><h1>History</h1>
-      <p class="muted">Every change, newest first. Click a column heading to sort. Showing: ${esc(what)}.</p>
-      ${items.length ? `<div class="table-wrap"><table id="history-table"><thead><tr>
+  if (historyOlder.filter !== filter) historyOlder = { filter, items: [], done: false };
+  const newest = await api(`/activity?${filter ? `${filter}&` : ''}limit=${HISTORY_PAGE}`);
+  const lowest = newest.length ? newest.at(-1).id : Infinity;
+  const items = [...newest, ...historyOlder.items.filter((a) => a.id < lowest)];
+  const more = !historyOlder.done && (historyOlder.items.length ? true : newest.length >= HISTORY_PAGE);
+  historyShown = items;
+  const title = historyTitle(query);
+  const [backHref, backText] = historyBack(query);
+  return `<p class="crumbs"><a href="${backHref}">‹ ${esc(backText)}</a> › History</p>
+    <section class="panel"><h1>History${title ? ` <span class="muted">· ${esc(title)}</span>` : ''}</h1>
+      <p class="muted">Every change, newest first. Click a column heading to sort, type in the box to narrow it down. ${num(items.length)} line${items.length === 1 ? '' : 's'} shown${more ? ': “Show older” adds the ones before' : ', all there is'}.</p>
+      ${items.length ? `<p class="codes-actions"><button class="btn btn-small" type="button" data-hist-csv>Download as a spreadsheet (CSV)</button></p>
+        <div class="table-wrap sheet"><table id="history-table" class="sheet" data-filter-rows="1"><thead><tr>
         <th>When</th><th>Who</th><th>Kind</th><th>What</th><th>Job</th><th>Load</th><th>Stack</th><th>Mark</th></tr></thead>
         <tbody>${items.map(historyRow).join('')}</tbody></table></div>
-        ${items.length >= 100 ? `<p><button class="btn more" type="button" data-hist-more="${items.at(-1).id}" data-hist-filter="${esc(filter)}">Show older</button></p>` : ''}`
+        ${more ? `<p><button class="btn more" type="button" data-hist-more="${items.at(-1).id}" data-hist-filter="${esc(filter)}">Show ${HISTORY_PAGE} older</button></p>` : ''}`
         : '<p class="muted">Nothing yet.</p>'}
     </section>`;
+}
+
+let historyShown = [];
+
+// The History lines on screen as a CSV file Excel opens.
+function historyCsv() {
+  const cell = (v) => { const t = String(v ?? ''); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [['When', 'Who', 'Kind', 'What', 'Job', 'Load', 'Stack', 'Mark'],
+    ...historyShown.map((a) => [new Date(a.at).toLocaleString(), deviceOf(a.deviceId)?.name ?? a.deviceName ?? '', a.kind, a.text, a.job, a.loadNumber, a.stackName, a.mark])];
+  const blob = new Blob([`﻿${rows.map((r) => r.map(cell).join(',')).join('\r\n')}\r\n`], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `terra-history-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 // ---- Labels: job, then mark, then the sheet with the used positions picked ---------------------
@@ -2069,7 +2130,12 @@ function sortTable(table, col, dir) {
   });
 }
 
-// Marks every table in the page as sortable, and sorts it the way it was last sorted.
+// Marks every table in the page as sortable, and sorts it the way it was last sorted. A long table
+// (or one that asks with data-filter-rows) also gets a box above it that hides the rows not matching
+// what's typed; the jobs tables have their own box.
+const FILTER_ROWS = 10;
+const filterState = new Map(); // "page:table index" -> text typed
+
 function enhanceTables(root, page) {
   root.querySelectorAll('table').forEach((table, i) => {
     if (!table.tHead || !table.tBodies[0]?.rows.length) return;
@@ -2079,10 +2145,32 @@ function enhanceTables(root, page) {
     const state = sortState.get(key);
     table.querySelectorAll('thead th').forEach((th, c) => {
       th.tabIndex = 0;
+      th.title = 'Sort by this column';
       th.setAttribute('aria-sort', state?.col === c ? (state.dir === 1 ? 'ascending' : 'descending') : 'none');
     });
     if (state) sortTable(table, state.col, state.dir);
+    const ownFilter = table.id === 'jobs-table' || table.id === 'photo-jobs-table';
+    if (ownFilter || (!table.dataset.filterRows && table.tBodies[0].rows.length < FILTER_ROWS)) return;
+    let box = root.querySelector(`[data-table-filter="${key}"]`);
+    if (!box) {
+      const anchor = table.parentElement.matches('.table-wrap, div[style*="overflow"]') ? table.parentElement : table;
+      anchor.insertAdjacentHTML('beforebegin', `<input class="filter table-filter" type="search" data-table-filter="${key}" placeholder="Filter these ${num(table.tBodies[0].rows.length)} rows" autocomplete="off" spellcheck="false">`);
+      box = root.querySelector(`[data-table-filter="${key}"]`);
+      box.value = filterState.get(key) ?? '';
+    }
+    filterTable(table, box.value);
   });
+}
+
+function filterTable(table, text) {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  for (const tr of table.tBodies[0].rows) {
+    const hay = tr.textContent.toLowerCase();
+    tr.hidden = !words.every((w) => hay.includes(w));
+    if (!tr.hidden) shown++;
+  }
+  table.dataset.shown = shown;
 }
 
 function sortByHeading(th) {
